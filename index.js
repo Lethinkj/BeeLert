@@ -1,6 +1,11 @@
 const { Client, GatewayIntentBits, Events } = require('discord.js');
 const cron = require('node-cron');
+const express = require('express');
 require('dotenv').config();
+
+// Create Express app for health check
+const app = express();
+const PORT = process.env.PORT || 3000;
 
 // Create Discord client with necessary intents
 const client = new Client({
@@ -15,6 +20,14 @@ const client = new Client({
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const CHANNEL_ID = process.env.CHANNEL_ID;
 const ROLE_NAME = process.env.ROLE_NAME || 'Basher';
+
+// Bot status tracking
+let botStatus = {
+    isOnline: false,
+    connectedAt: null,
+    lastMessageSent: null,
+    totalMessagesSent: 0
+};
 
 // Motivational quotes about consistent learning and progress
 const motivationalQuotes = [
@@ -57,6 +70,46 @@ function getDailyQuote() {
     const quoteIndex = dayOfYear % motivationalQuotes.length;
     return motivationalQuotes[quoteIndex];
 }
+
+// Express API endpoints
+app.get('/', (req, res) => {
+    res.json({
+        service: 'BeeLert Discord Bot',
+        status: botStatus.isOnline ? 'online' : 'offline',
+        uptime: botStatus.connectedAt ? Math.floor((Date.now() - new Date(botStatus.connectedAt)) / 1000) : 0,
+        endpoints: {
+            health: '/health',
+            status: '/status'
+        }
+    });
+});
+
+app.get('/health', (req, res) => {
+    res.status(200).json({
+        status: 'OK',
+        timestamp: new Date().toISOString()
+    });
+});
+
+app.get('/status', (req, res) => {
+    const statusCode = botStatus.isOnline ? 200 : 503;
+    res.status(statusCode).json({
+        botOnline: botStatus.isOnline,
+        connectedAt: botStatus.connectedAt,
+        lastMessageSent: botStatus.lastMessageSent,
+        totalMessagesSent: botStatus.totalMessagesSent,
+        uptime: botStatus.connectedAt ? Math.floor((Date.now() - new Date(botStatus.connectedAt)) / 1000) : 0,
+        nextScheduledUpdate: '9:00 PM IST',
+        timestamp: new Date().toISOString()
+    });
+});
+
+// Start Express server
+app.listen(PORT, () => {
+    console.log(`Express server running on port ${PORT}`);
+    console.log(`Health check: http://localhost:${PORT}/health`);
+    console.log(`Status check: http://localhost:${PORT}/status`);
+});
 
 // Helper function to get current IST time
 function getISTTime() {
@@ -154,15 +207,22 @@ client.once(Events.ClientReady, async (c) => {
     console.log(`${c.user.tag} has connected to Discord!`);
     console.log(`Bot is ready at ${formatISTTime(getISTTime())}`);
 
+    // Update bot status
+    botStatus.isOnline = true;
+    botStatus.connectedAt = new Date().toISOString();
+
     // Send startup message
     await sendStartupMessage();
+    botStatus.totalMessagesSent++;
 
     // Schedule daily update at 9:00 PM IST (21:00)
     // Cron format: minute hour * * *
     // 0 21 * * * means every day at 21:00 (9:00 PM) IST
-    cron.schedule('0 21 * * *', () => {
+    cron.schedule('0 21 * * *', async () => {
         console.log('Running scheduled daily update...');
-        sendDailyUpdate();
+        await sendDailyUpdate();
+        botStatus.lastMessageSent = new Date().toISOString();
+        botStatus.totalMessagesSent++;
     }, {
         timezone: 'Asia/Kolkata'
     });
@@ -214,6 +274,7 @@ client.on(Events.MessageCreate, async (message) => {
 // Error handling
 client.on(Events.Error, error => {
     console.error('Discord client error:', error);
+    botStatus.isOnline = false;
 });
 
 process.on('unhandledRejection', error => {
