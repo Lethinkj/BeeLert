@@ -23,6 +23,7 @@ const client = new Client({
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const CHANNEL_ID = process.env.CHANNEL_ID;
 const GEMINI_CHANNEL_ID = process.env.GEMINI_CHANNEL_ID;
+const STUDY_CHANNEL_ID = process.env.STUDY_CHANNEL_ID;
 const ROLE_NAME = process.env.ROLE_NAME || 'Basher';
 
 // Bot status tracking
@@ -297,8 +298,12 @@ client.on(Events.MessageCreate, async (message) => {
         return;
     }
 
-    // !study command - Start study session
+    // !study command - Start study session (only in study channel)
     if (message.content.startsWith('!study')) {
+        if (message.channel.id !== STUDY_CHANNEL_ID) {
+            return message.reply(`Please use the study timer in <#${STUDY_CHANNEL_ID}> channel!`);
+        }
+        
         const args = message.content.split(' ');
         const duration = parseInt(args[1]) || 25; // Default 25 minutes
         
@@ -309,21 +314,31 @@ client.on(Events.MessageCreate, async (message) => {
         const userId = message.author.id;
         const startTime = Date.now();
         
+        const startMsg = await message.reply(`🎯 Study session started! Duration: ${duration} minutes.\nI'll remind you when time's up. Focus mode ON! 📚`);
+        
         studySessions.set(userId, {
             startTime,
             duration,
-            channelId: message.channel.id
+            channelId: STUDY_CHANNEL_ID,
+            commandMessage: message,
+            responseMessage: startMsg
         });
         
-        await message.reply(`🎯 Study session started! Duration: ${duration} minutes.\nI'll remind you when time's up. Focus mode ON! 📚`);
-        
-        // Schedule end reminder
+        // Schedule end reminder in study channel
         setTimeout(async () => {
             const session = studySessions.get(userId);
             if (session && session.startTime === startTime) {
                 try {
-                    const channel = await client.channels.fetch(session.channelId);
-                    await channel.send(`<@${userId}> ⏰ Time's up! You've completed ${duration} minutes of focused study. Great work! 🎉\n\nTake a break and stay hydrated! 💧`);
+                    const channel = await client.channels.fetch(STUDY_CHANNEL_ID);
+                    const completionMsg = await channel.send(`<@${userId}> ⏰ **Study Session Completed!** 🎉\n\nYou've successfully completed ${duration} minutes of focused study. Amazing dedication! 💪\n\nTake a well-deserved break and stay hydrated! 💧`);
+                    
+                    // Delete all messages after 5 seconds
+                    setTimeout(() => {
+                        session.commandMessage.delete().catch(() => {});
+                        session.responseMessage.delete().catch(() => {});
+                        completionMsg.delete().catch(() => {});
+                    }, 5000);
+                    
                     studySessions.delete(userId);
                 } catch (error) {
                     console.error('Error sending study reminder:', error);
@@ -334,8 +349,12 @@ client.on(Events.MessageCreate, async (message) => {
         return;
     }
     
-    // !studystatus command - Check study session
+    // !studystatus command - Check study session (only in study channel)
     if (message.content === '!studystatus') {
+        if (message.channel.id !== STUDY_CHANNEL_ID) {
+            return message.reply(`Please use the study timer in <#${STUDY_CHANNEL_ID}> channel!`);
+        }
+        
         const userId = message.author.id;
         const session = studySessions.get(userId);
         
@@ -350,8 +369,12 @@ client.on(Events.MessageCreate, async (message) => {
         return;
     }
     
-    // !endstudy command - End study session early
+    // !endstudy command - End study session early (only in study channel)
     if (message.content === '!endstudy') {
+        if (message.channel.id !== STUDY_CHANNEL_ID) {
+            return message.reply(`Please use the study timer in <#${STUDY_CHANNEL_ID}> channel!`);
+        }
+        
         const userId = message.author.id;
         const session = studySessions.get(userId);
         
@@ -414,6 +437,7 @@ client.on(Events.MessageCreate, async (message) => {
             `🤖 **Gemini AI:**\n` +
             `Go to <#${GEMINI_CHANNEL_ID}> and just type your question!\n` +
             `Messages auto-delete after 24 hours.\n\n` +
+            `📚 **Study Channel:** <#${STUDY_CHANNEL_ID}>\n\n` +
             `💡 **Daily Updates:** Automatic at 9:00 PM IST with AI motivation!`;
         
         await message.reply(helpMessage);
