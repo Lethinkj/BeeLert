@@ -71,12 +71,16 @@ Edit the `.env` file and add your configuration:
 ```env
 BOT_TOKEN=YOUR_DISCORD_BOT_TOKEN_HERE
 CHANNEL_ID=YOUR_CHANNEL_ID_HERE
+GEMINI_CHANNEL_ID=YOUR_AI_CHAT_CHANNEL_ID_HERE
 ROLE_NAME=Basher
+OPENAI_API_KEY=YOUR_OPENROUTER_API_KEY_HERE
 ```
 
 - **BOT_TOKEN**: Your Discord bot token from the Developer Portal
-- **CHANNEL_ID**: The ID of the channel where messages should be posted
+- **CHANNEL_ID**: The ID of the channel where daily updates should be posted
+- **GEMINI_CHANNEL_ID**: The ID of the channel for AI chat interactions
 - **ROLE_NAME**: The name of the role to mention (default: "Basher")
+- **OPENAI_API_KEY**: Your OpenRouter API key (get from https://openrouter.ai/keys)
 
 **Note:** Never share or commit your actual bot token to GitHub!
 
@@ -144,37 +148,77 @@ Next Update: Tomorrow at 9:00 PM IST
 - Make sure the bot stays running continuously
 - Check console output for any errors
 
-## Keeping the Bot Running 24/7
+## Deploy to Render.com (Recommended)
 
-To keep the bot running continuously, you can:
+### Step 1: Prepare Repository
+1. Make sure all changes are committed to GitHub
+2. Push to your repository: https://github.com/Lethinkj/BeeLert
 
-1. **Use a VPS/Cloud Server**: Deploy on AWS, DigitalOcean, Azure, etc.
-2. **Use a Raspberry Pi**: Run it on a local device
-3. **Use a hosting service**: Deploy to Railway, Render, Glitch, or similar platforms
-4. **Use PM2** (recommended for Node.js):
+### Step 2: Create Render Web Service
+1. Go to https://render.com/
+2. Click "New +" → "Web Service"
+3. Connect your GitHub account and select your repository
+4. Configure the service:
+   - **Name**: BeeLert (or your choice)
+   - **Region**: Choose closest to you
+   - **Branch**: main
+   - **Runtime**: Node
+   - **Build Command**: `npm install`
+   - **Start Command**: `npm start`
+   - **Instance Type**: Free
 
-```powershell
-npm install -g pm2
-pm2 start index.js --name discord-bot
-pm2 save
-pm2 startup
+### Step 3: Add Environment Variables
+In Render dashboard, go to "Environment" tab and add:
+```
+BOT_TOKEN=your_discord_bot_token_here
+CHANNEL_ID=your_main_channel_id_here
+GEMINI_CHANNEL_ID=your_ai_chat_channel_id_here
+ROLE_NAME=Basher
+OPENAI_API_KEY=your_openrouter_api_key_here
+PORT=3000
 ```
 
-PM2 will keep your bot running and automatically restart it if it crashes.
+**Important:** Use your actual values from `.env` file, not these placeholders!
+
+### Step 4: Deploy
+1. Click "Create Web Service"
+2. Wait for deployment to complete
+3. Check logs for "Bot is ready at" message
+
+### Health Check URL
+Your bot's health check will be at: `https://your-app-name.onrender.com/health`
+
+## Features
+
+### AI-Powered Chat
+- Send messages in the AI chat channel (ID: 1438921892101886022)
+- Bot responds using GPT-4o-mini via OpenRouter
+- Messages auto-delete after 24 hours
+
+### Study Timer
+- `!study <minutes>` - Start a study session
+- `!studystatus` - Check current session
+- `!endstudy` - End session early
+
+### Bot Commands
+- `!status` - Check bot status
+- `!help` - Show available commands
+- `!testupdate` - Test daily update (admin only)
 
 ## Notes
 
 - The bot must stay running to send daily updates
 - All times are in IST (Indian Standard Time)
-- The bot will calculate and wait until the next 9 PM to send the first scheduled update
-- The startup message is sent immediately when the bot connects
+- Health check API runs on port 3000 (required for Render)
+- Startup message is disabled to reduce spam
 
 ## Support
 
 If you encounter any issues:
-1. Check the console output for error messages
-2. Verify all configuration settings
+1. Check Render logs for error messages
+2. Verify all environment variables are set correctly
 3. Make sure the bot has proper permissions in your Discord server
+4. Check OpenRouter credits at https://openrouter.ai/credits
 
 ## License
 
