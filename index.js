@@ -460,7 +460,7 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
         
         // User joined a voice channel
         if (!oldChannel && newChannel) {
-            handleVoiceJoin(userId, newChannel);
+            await handleVoiceJoin(userId, newChannel);
         }
         // User left a voice channel
         else if (oldChannel && !newChannel) {
@@ -469,14 +469,14 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
         // User switched voice channels
         else if (oldChannel && newChannel && oldChannel.id !== newChannel.id) {
             await handleVoiceLeave(userId, oldChannel);
-            handleVoiceJoin(userId, newChannel);
+            await handleVoiceJoin(userId, newChannel);
         }
     } catch (error) {
         console.error('Error handling voice state update:', error);
     }
 });
 
-function handleVoiceJoin(userId, channel) {
+async function handleVoiceJoin(userId, channel) {
     const channelId = channel.id;
     const now = Date.now();
     
@@ -496,28 +496,29 @@ function handleVoiceJoin(userId, channel) {
     }
     
     const meeting = voiceMeetings.get(channelId);
+    
+    // Fetch username
+    const user = await client.users.fetch(userId).catch(() => null);
+    const username = user ? user.username : `User ${userId}`;
+    
     meeting.participants.set(userId, {
         joinTime: now,
         totalTime: 0,
-        sessions: []
+        sessions: [],
+        username: username
     });
     
     // Also track in allParticipants if not already there
     if (!meeting.allParticipants.has(userId)) {
         meeting.allParticipants.set(userId, {
             totalTime: 0,
-            sessions: []
+            sessions: [],
+            username: username
         });
     }
     
     meeting.lastActivity = now;
-    
-    // Get username for logging
-    client.users.fetch(userId).then(user => {
-        console.log(`👤 ${user.username} joined ${channel.name}`);
-    }).catch(() => {
-        console.log(`👤 User ${userId} joined ${channel.name}`);
-    });
+    console.log(`👤 ${username} joined ${channel.name}`);
 }
 
 async function handleVoiceLeave(userId, channel) {
@@ -551,7 +552,8 @@ async function handleVoiceLeave(userId, channel) {
         meeting.participants.delete(userId);
         meeting.lastActivity = now;
         
-        console.log(`👤 User ${userId} left ${channel.name} (session: ${Math.round(sessionTime / 1000 / 60)} min)`);
+        const username = allParticipantData.username || `User ${userId}`;
+        console.log(`👤 ${username} left ${channel.name} (session: ${Math.round(sessionTime / 1000 / 60)} min)`);
         
         // Check if meeting ended (no one left)
         if (meeting.participants.size === 0) {
@@ -619,8 +621,7 @@ async function generateMeetingSummary(meeting, totalDuration, channel, participa
         let totalParticipantTime = 0;
         
         for (const [userId, data] of participants.entries()) {
-            const user = await client.users.fetch(userId).catch(() => null);
-            const username = user ? user.username : `User ${userId}`;
+            const username = data.username || `User ${userId}`;
             
             const userMinutes = Math.round(data.totalTime / 1000 / 60);
             const percentage = ((data.totalTime / totalDuration) * 100).toFixed(1);
