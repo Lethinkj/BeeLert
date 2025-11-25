@@ -42,7 +42,7 @@ const studySessions = new Map(); // userId -> { startTime, duration, channelId }
 
 // Voice channel meeting tracking
 const voiceMeetings = new Map(); // channelId -> { startTime, participants: Map(userId -> joinTime), lastActivity }
-const MINIMUM_MEETING_DURATION = 2 * 60 * 1000; // 2 minutes in milliseconds
+const MINIMUM_MEETING_DURATION = 10 * 60 * 1000; // 10 minutes in milliseconds
 
 // Motivational quotes about consistent learning and progress
 const motivationalQuotes = [
