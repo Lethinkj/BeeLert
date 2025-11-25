@@ -16,6 +16,7 @@ const client = new Client({
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
+        GatewayIntentBits.GuildVoiceStates,
     ]
 });
 
@@ -24,6 +25,8 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const CHANNEL_ID = process.env.CHANNEL_ID;
 const GEMINI_CHANNEL_ID = process.env.GEMINI_CHANNEL_ID;
 const STUDY_CHANNEL_ID = process.env.STUDY_CHANNEL_ID;
+const LOUNGE_VOICE_CHANNEL_ID = process.env.LOUNGE_VOICE_CHANNEL_ID || '1350324320672546826';
+const MEETING_SUMMARY_CHANNEL_ID = process.env.MEETING_SUMMARY_CHANNEL_ID || '1442861248285773924';
 const ROLE_NAME = process.env.ROLE_NAME || 'Basher';
 
 // Bot status tracking
@@ -36,6 +39,10 @@ let botStatus = {
 
 // Study session tracking
 const studySessions = new Map(); // userId -> { startTime, duration, channelId }
+
+// Voice channel meeting tracking
+const voiceMeetings = new Map(); // channelId -> { startTime, participants: Map(userId -> joinTime), lastActivity }
+const MINIMUM_MEETING_DURATION = 2 * 60 * 1000; // 2 minutes in milliseconds
 
 // Motivational quotes about consistent learning and progress
 const motivationalQuotes = [
@@ -443,6 +450,232 @@ client.on(Events.MessageCreate, async (message) => {
         await message.reply(helpMessage);
     }
 });
+
+// Voice channel meeting tracking
+client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
+    try {
+        const userId = newState.id;
+        const oldChannel = oldState.channel;
+        const newChannel = newState.channel;
+        
+        // User joined a voice channel
+        if (!oldChannel && newChannel) {
+            handleVoiceJoin(userId, newChannel);
+        }
+        // User left a voice channel
+        else if (oldChannel && !newChannel) {
+            await handleVoiceLeave(userId, oldChannel);
+        }
+        // User switched voice channels
+        else if (oldChannel && newChannel && oldChannel.id !== newChannel.id) {
+            await handleVoiceLeave(userId, oldChannel);
+            handleVoiceJoin(userId, newChannel);
+        }
+    } catch (error) {
+        console.error('Error handling voice state update:', error);
+    }
+});
+
+function handleVoiceJoin(userId, channel) {
+    const channelId = channel.id;
+    const now = Date.now();
+    
+    // Only track the lounge voice channel
+    if (channelId !== LOUNGE_VOICE_CHANNEL_ID) return;
+    
+    if (!voiceMeetings.has(channelId)) {
+        // Start new meeting session
+        voiceMeetings.set(channelId, {
+            startTime: now,
+            channelName: channel.name,
+            participants: new Map(),
+            allParticipants: new Map(), // Store all participants who ever joined
+            lastActivity: now
+        });
+        console.log(`📊 Meeting started in voice channel: ${channel.name}`);
+    }
+    
+    const meeting = voiceMeetings.get(channelId);
+    meeting.participants.set(userId, {
+        joinTime: now,
+        totalTime: 0,
+        sessions: []
+    });
+    
+    // Also track in allParticipants if not already there
+    if (!meeting.allParticipants.has(userId)) {
+        meeting.allParticipants.set(userId, {
+            totalTime: 0,
+            sessions: []
+        });
+    }
+    
+    meeting.lastActivity = now;
+    
+    // Get username for logging
+    client.users.fetch(userId).then(user => {
+        console.log(`👤 ${user.username} joined ${channel.name}`);
+    }).catch(() => {
+        console.log(`👤 User ${userId} joined ${channel.name}`);
+    });
+}
+
+async function handleVoiceLeave(userId, channel) {
+    const channelId = channel.id;
+    const now = Date.now();
+    
+    // Only track the lounge voice channel
+    if (channelId !== LOUNGE_VOICE_CHANNEL_ID) return;
+    
+    if (!voiceMeetings.has(channelId)) return;
+    
+    const meeting = voiceMeetings.get(channelId);
+    const participant = meeting.participants.get(userId);
+    
+    if (participant) {
+        // Calculate session time
+        const sessionTime = now - participant.joinTime;
+        
+        // Update allParticipants data
+        const allParticipantData = meeting.allParticipants.get(userId);
+        if (allParticipantData) {
+            allParticipantData.totalTime += sessionTime;
+            allParticipantData.sessions.push({
+                start: participant.joinTime,
+                end: now,
+                duration: sessionTime
+            });
+        }
+        
+        // Remove from active participants
+        meeting.participants.delete(userId);
+        meeting.lastActivity = now;
+        
+        console.log(`👤 User ${userId} left ${channel.name} (session: ${Math.round(sessionTime / 1000 / 60)} min)`);
+        
+        // Check if meeting ended (no one left)
+        if (meeting.participants.size === 0) {
+            await endMeeting(channelId, channel);
+        }
+    }
+}
+
+async function endMeeting(channelId, channel) {
+    const meeting = voiceMeetings.get(channelId);
+    if (!meeting) return;
+    
+    const now = Date.now();
+    const meetingDuration = now - meeting.startTime;
+    
+    // Check minimum duration (20 minutes)
+    if (meetingDuration < MINIMUM_MEETING_DURATION) {
+        console.log(`⏱️ Meeting in ${channel.name} too short (${Math.round(meetingDuration / 1000 / 60)} min), skipping summary`);
+        voiceMeetings.delete(channelId);
+        return;
+    }
+    
+    // If no participants recorded, skip
+    if (meeting.allParticipants.size === 0) {
+        voiceMeetings.delete(channelId);
+        return;
+    }
+    
+    await generateMeetingSummary(meeting, meetingDuration, channel, meeting.allParticipants);
+    voiceMeetings.delete(channelId);
+}
+
+async function generateMeetingSummary(meeting, totalDuration, channel, participants) {
+    try {
+        const summaryChannelId = process.env.MEETING_SUMMARY_CHANNEL_ID || MEETING_SUMMARY_CHANNEL_ID;
+        const summaryChannel = await client.channels.fetch(summaryChannelId);
+        
+        if (!summaryChannel) {
+            console.error('Meeting summary channel not found');
+            return;
+        }
+        
+        // Format date
+        const meetingDate = new Date(meeting.startTime);
+        const dateStr = meetingDate.toLocaleDateString('en-IN', {
+            timeZone: 'Asia/Kolkata',
+            weekday: 'long',
+            year: 'numeric',
+            month: 'long',
+            day: 'numeric'
+        });
+        const timeStr = meetingDate.toLocaleTimeString('en-IN', {
+            timeZone: 'Asia/Kolkata',
+            hour: '2-digit',
+            minute: '2-digit'
+        });
+        
+        // Format duration
+        const hours = Math.floor(totalDuration / (1000 * 60 * 60));
+        const minutes = Math.floor((totalDuration % (1000 * 60 * 60)) / (1000 * 60));
+        const durationStr = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+        
+        // Build participant list
+        let participantList = '';
+        let totalParticipantTime = 0;
+        
+        for (const [userId, data] of participants.entries()) {
+            const user = await client.users.fetch(userId).catch(() => null);
+            const username = user ? user.username : `User ${userId}`;
+            
+            const userMinutes = Math.round(data.totalTime / 1000 / 60);
+            const percentage = ((data.totalTime / totalDuration) * 100).toFixed(1);
+            
+            participantList += `• **${username}**: ${userMinutes} minutes (${percentage}%)\n`;
+            totalParticipantTime += data.totalTime;
+        }
+        
+        // Calculate average
+        const avgTime = Math.round((totalParticipantTime / participants.size) / 1000 / 60);
+        
+        // Create summary embed
+        const summaryEmbed = {
+            color: 0x5865F2,
+            title: '🎙️ Voice Meeting Summary',
+            fields: [
+                {
+                    name: '📅 Date',
+                    value: `${dateStr} at ${timeStr}`,
+                    inline: false
+                },
+                {
+                    name: '🏷️ Channel',
+                    value: meeting.channelName,
+                    inline: true
+                },
+                {
+                    name: '⏱️ Total Duration',
+                    value: durationStr,
+                    inline: true
+                },
+                {
+                    name: '👥 Participants',
+                    value: participantList || 'No participants',
+                    inline: false
+                },
+                {
+                    name: '📊 Statistics',
+                    value: `Total Participants: ${participants.size}\nAverage Active Time: ${avgTime} minutes`,
+                    inline: false
+                }
+            ],
+            timestamp: new Date().toISOString(),
+            footer: {
+                text: 'BeeLert Meeting Tracker'
+            }
+        };
+        
+        await summaryChannel.send({ embeds: [summaryEmbed] });
+        console.log(`✅ Meeting summary posted for ${meeting.channelName}`);
+        
+    } catch (error) {
+        console.error('Error generating meeting summary:', error);
+    }
+}
 
 // Error handling
 client.on(Events.Error, error => {
