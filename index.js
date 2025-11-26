@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, Events, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, Partials } = require('discord.js');
+const { Client, GatewayIntentBits, Events, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, Partials, MessageFlags } = require('discord.js');
 const cron = require('node-cron');
 const express = require('express');
 require('dotenv').config();
@@ -450,7 +450,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 if (scheduledMeetings.size === 0) {
                     return interaction.reply({ 
                         content: '📭 No upcoming meetings scheduled.', 
-                        ephemeral: true 
+                        flags: MessageFlags.Ephemeral
                     });
                 }
 
@@ -495,7 +495,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 await interaction.reply({ 
                     content: message, 
                     components: rows,
-                    ephemeral: true 
+                    flags: MessageFlags.Ephemeral
                 });
                 return;
             }
@@ -511,7 +511,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                     if (meeting.creatorId !== interaction.user.id) {
                         return interaction.reply({
                             content: '❌ Only the meeting creator can cancel this meeting.',
-                            ephemeral: true
+                            flags: MessageFlags.Ephemeral
                         });
                     }
                     
@@ -531,7 +531,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                     await interaction.reply({
                         content: `⚠️ Are you sure you want to cancel **"${meeting.topic}"**?`,
                         components: [confirmRow],
-                        ephemeral: true
+                        flags: MessageFlags.Ephemeral
                     });
                 }
                 return;
@@ -585,7 +585,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 if (parts.length < 2) {
                     return interaction.reply({
                         content: '❌ Invalid time format. Use format like: **8:00 PM**',
-                        ephemeral: true
+                        flags: MessageFlags.Ephemeral
                     });
                 }
                 
@@ -597,7 +597,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 if (isNaN(hours) || isNaN(minutes) || hours < 1 || hours > 12 || minutes < 0 || minutes > 59) {
                     return interaction.reply({
                         content: '❌ Invalid time format. Use format like: **8:00 PM**',
-                        ephemeral: true
+                        flags: MessageFlags.Ephemeral
                     });
                 }
                 
@@ -674,7 +674,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                             `📝 Topic: ${topic}\n` +
                             `🕐 Time: ${timeDispStr} IST\n\n` +
                             `The confirmation is visible to everyone in <#${SCHEDULE_MEET_CHANNEL_ID}>`,
-                    ephemeral: true
+                    flags: MessageFlags.Ephemeral
                 });
                 
                 console.log(`📅 Meeting scheduled by ${interaction.user.username}: ${topic} at ${timeDispStr}`);
@@ -683,7 +683,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 console.error('Error scheduling meeting:', error);
                 await interaction.reply({
                     content: '❌ Invalid time format. Use format like: **8:00 PM**',
-                    ephemeral: true
+                    flags: MessageFlags.Ephemeral
                 });
             }
             return;
@@ -694,7 +694,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (!interaction.replied && !interaction.deferred) {
             await interaction.reply({
                 content: '❌ An error occurred while processing your request.',
-                ephemeral: true
+                flags: MessageFlags.Ephemeral
             }).catch(console.error);
         }
     }
