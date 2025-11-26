@@ -604,10 +604,21 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 if (period.toUpperCase() === 'PM' && hours !== 12) hours += 12;
                 if (period.toUpperCase() === 'AM' && hours === 12) hours = 0;
                 
-                // Create scheduled time for today
-                const now = getISTTime();
-                const scheduledTime = new Date(now);
-                scheduledTime.setHours(hours, minutes, 0, 0);
+                // Create scheduled time for today in IST
+                const now = new Date();
+                const istNow = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+                
+                // Get current IST date components
+                const istDateStr = now.toLocaleString('en-US', { 
+                    timeZone: 'Asia/Kolkata',
+                    year: 'numeric',
+                    month: '2-digit',
+                    day: '2-digit'
+                });
+                const [month, day, year] = istDateStr.split('/');
+                
+                // Create date in IST with user's specified time
+                const scheduledTime = new Date(`${year}-${month}-${day}T${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:00+05:30`);
                 
                 // If time already passed today, schedule for tomorrow
                 if (scheduledTime <= now) {
