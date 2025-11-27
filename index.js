@@ -32,6 +32,22 @@ const MEETING_SUMMARY_CHANNEL_ID = process.env.MEETING_SUMMARY_CHANNEL_ID || '14
 const SCHEDULE_MEET_CHANNEL_ID = process.env.SCHEDULE_MEET_CHANNEL_ID || '1443135153185493033';
 const ROLE_NAME = process.env.ROLE_NAME || 'Basher';
 
+// Clan member IDs
+const CLAN_MEMBERS = [
+    '1259881373309861888', // Alisha
+    '1309201554787664026', // Anitus
+    '1181238306671968256', // Archana
+    '1337604789378482228', // Arthi
+    '1097767757434597398', // Bennyhinn
+    '1344618947185606707', // Beule
+    '1187606759351799970', // Jijo
+    '1308385757576036412', // Lifnan
+    '1173582369484177470', // Ashif
+    '1344619303688998934', // Shailu
+    '1171801933158285354', // Shaniya
+    '1174295899745296438', // Lethin
+];
+
 // Bot status tracking
 let botStatus = {
     isOnline: false,
@@ -79,29 +95,50 @@ function saveReminders() {
     }
 }
 
-// Notify users about bot restart
-async function notifyUsersAboutRestart() {
-    if (userReminders.size === 0) return;
+// Send welcome message to new clan members
+async function sendWelcomeMessages() {
+    console.log(`📢 Sending welcome/restart messages to ${CLAN_MEMBERS.length} clan members...`);
     
-    console.log(`📢 Notifying ${userReminders.size} users about restart...`);
-    
-    for (const [userId, settings] of userReminders.entries()) {
+    for (const userId of CLAN_MEMBERS) {
         try {
             const user = await client.users.fetch(userId);
-            await user.send(
-                "⚠️ **Bot Restart Notice**\n\n" +
-                "Sorry for the inconvenience! The bot restarted due to technical maintenance.\n\n" +
-                "📋 **Your reminder settings:**\n" +
-                `⏰ Time: ${settings.time} IST\n` +
-                `📝 Message: ${settings.customMessage || 'Default'}\n` +
-                `🔔 Status: ${settings.active ? '✅ Active' : '⏸️ Paused'}\n\n` +
-                "✅ Your reminders are still active and will work as scheduled!\n\n" +
-                "Type `help` for available commands."
-            );
-            console.log(`✅ Notified ${user.username}`);
-            await new Promise(resolve => setTimeout(resolve, 1000)); // Rate limit
+            const hasReminder = userReminders.has(userId);
+            
+            if (!hasReminder) {
+                // First time / new user message
+                await user.send(
+                    "🎉 **Welcome to BeeLert Bot!**\n\n" +
+                    "This bot helps you stay productive and organized!\n\n" +
+                    "**Features:**\n" +
+                    "📅 Schedule team meetings\n" +
+                    "⏰ Get daily reminder messages\n" +
+                    "🤖 AI-powered motivation\n" +
+                    "📊 Voice meeting tracking\n\n" +
+                    "**Get Started:**\n" +
+                    "• Type `reminder` to set up your daily reminder\n" +
+                    "• Type `help` to see all available commands\n\n" +
+                    "Let's boost your productivity! 🚀"
+                );
+                console.log(`✅ Welcome message sent to ${user.username}`);
+            } else {
+                // Restart message for existing users
+                const settings = userReminders.get(userId);
+                await user.send(
+                    "⚠️ **Bot Restart Notice**\n\n" +
+                    "Sorry for the inconvenience! There was a technical issue and the bot restarted.\n\n" +
+                    "📋 **Your reminder settings:**\n" +
+                    `⏰ Time: ${settings.time} IST\n` +
+                    `📝 Message: ${settings.customMessage || 'Default'}\n` +
+                    `🔔 Status: ${settings.active ? '✅ Active' : '⏸️ Paused'}\n\n` +
+                    "⚠️ **Please note:** If your reminder was active, please reschedule it by typing `reminder` again.\n\n" +
+                    "Sorry for the inconvenience! Type `help` for available commands."
+                );
+                console.log(`✅ Restart notice sent to ${user.username}`);
+            }
+            
+            await new Promise(resolve => setTimeout(resolve, 1500)); // Rate limit
         } catch (error) {
-            console.error(`❌ Cannot notify user ${userId}:`, error.message);
+            console.error(`❌ Cannot message user ${userId}:`, error.message);
         }
     }
 }
@@ -213,10 +250,8 @@ async function postMeetingManager(channel) {
         );
 
     await channel.send({
-        content: '╔══════════════════════════════════════╗\n' +
-                 '║      📅 MEETING MANAGER              ║\n' +
-                 '╚══════════════════════════════════════╝\n\n' +
-                 '**Manage your team meetings easily!**\n\n' +
+        content: '📅 **MEETING MANAGER**\n\n' +
+                 'Manage your team meetings easily!\n\n' +
                  '• Click **Schedule Meeting** to create a new meeting\n' +
                  '• Click **View Meetings** to see upcoming meetings\n' +
                  '• Only meeting creators can cancel their meetings',
@@ -275,33 +310,6 @@ function formatISTDate(date) {
     });
 }
 
-// Send startup message
-async function sendStartupMessage() {
-    try {
-        const channel = await client.channels.fetch(CHANNEL_ID);
-        if (!channel) {
-            console.error(`Error: Could not find channel with ID ${CHANNEL_ID}`);
-            return;
-        }
-
-        const guild = channel.guild;
-        const role = guild.roles.cache.find(r => r.name === ROLE_NAME);
-
-        if (!role) {
-            console.error(`Error: Could not find role '${ROLE_NAME}'`);
-            return;
-        }
-
-        const currentTime = formatISTTime(getISTTime());
-        const message = `${role} 🤖 Bot has started successfully!\n\n**Status:** Online and ready\n**Daily Reminders:** Scheduled at 9:00 PM IST`;
-
-        await channel.send(message);
-        console.log(`Startup message sent at ${currentTime}`);
-    } catch (error) {
-        console.error('Error sending startup message:', error);
-    }
-}
-
 // Send daily progress update
 async function sendDailyUpdate() {
     try {
@@ -343,19 +351,12 @@ client.once(Events.ClientReady, async (c) => {
     // Load saved reminders
     loadReminders();
     
-    // Notify users about restart (only if reminders exist)
-    if (userReminders.size > 0) {
-        // Wait a bit before sending notifications
-        setTimeout(() => notifyUsersAboutRestart(), 3000);
-    }
+    // Send welcome/restart messages to all clan members
+    setTimeout(() => sendWelcomeMessages(), 3000);
 
     // Update bot status
     botStatus.isOnline = true;
     botStatus.connectedAt = new Date().toISOString();
-
-    // Send startup message - DISABLED
-    // await sendStartupMessage();
-    botStatus.totalMessagesSent++;
 
     // Schedule daily update at 9:00 PM IST (21:00)
     // Cron format: minute hour * * *
@@ -454,9 +455,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                     });
                 }
 
-                let message = '╔══════════════════════════════════════╗\n' +
-                              '║      📋 UPCOMING MEETINGS            ║\n' +
-                              '╚══════════════════════════════════════╝\n\n';
+                let message = '📋 **UPCOMING MEETINGS**\n\n';
 
                 const buttons = [];
                 scheduledMeetings.forEach((meeting, id) => {
@@ -470,8 +469,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
                         hour12: true
                     });
                     
-                    const creatorTag = meeting.creatorId === interaction.user.id ? ' (Your meeting)' : '';
-                    message += `🔹 **${meeting.topic}**${creatorTag}\n   ⏰ ${timeStr} IST\n\n`;
+                    const creatorTag = meeting.creatorId === interaction.user.id ? ' 👤' : '';
+                    message += `📌 **${meeting.topic}**${creatorTag}\n🕐 ${timeStr} IST\n\n`;
 
                     // Only show cancel button if user is the creator
                     if (meeting.creatorId === interaction.user.id) {
@@ -651,12 +650,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 // Send confirmation in schedule channel (visible to all)
                 const scheduleChannel = await client.channels.fetch(SCHEDULE_MEET_CHANNEL_ID);
                 const confirmationMsg = await scheduleChannel.send({
-                    content: `✅ **Meeting Scheduled by <@${interaction.user.id}>**\n` +
-                            `📅 Date: ${dateStr}\n` +
-                            `🕐 Time: ${timeDispStr} IST\n` +
-                            `📝 Topic: **${topic}**\n` +
-                            `📍 Location: Lounge voice channel\n\n` +
-                            `A reminder will be posted in the general channel at the scheduled time.`
+                    content: `✅ **Meeting Scheduled**\n` +
+                            `👤 By: <@${interaction.user.id}>\n` +
+                            `📅 ${dateStr}\n` +
+                            `🕐 ${timeDispStr} IST\n` +
+                            `📝 **${topic}**\n` +
+                            `📍 Lounge voice channel\n\n` +
+                            `⏰ Reminder will be posted at meeting time.`
                 });
                 
                 scheduledMeetings.set(meetingId, {
@@ -917,11 +917,28 @@ client.on(Events.MessageCreate, async (message) => {
                 return;
             }
             
-            // Unknown command in DM
-            await message.reply(
-                "🤔 I didn't understand that.\n\n" +
-                "Type `help` to see all available commands, or `reminder` to set up daily reminders!"
-            );
+            // Unknown command in DM - Use AI to respond
+            try {
+                const typing = message.channel.sendTyping();
+                
+                const aiResponse = await aiService.askQuestion(
+                    `You are BeeLert, a helpful productivity bot assistant. A user sent you: "${message.content}". ` +
+                    `Respond helpfully and mention they can type 'help' for commands or 'reminder' to set up daily reminders. ` +
+                    `Keep response under 200 words.`
+                );
+                
+                await message.reply(
+                    aiResponse || 
+                    "🤔 I didn't understand that.\n\n" +
+                    "Type `help` to see all available commands, or `reminder` to set up daily reminders!"
+                );
+            } catch (aiError) {
+                console.error('AI response error in DM:', aiError);
+                await message.reply(
+                    "🤔 I didn't understand that.\n\n" +
+                    "Type `help` to see all available commands, or `reminder` to set up daily reminders!"
+                );
+            }
             
         } catch (error) {
             console.error('Error handling DM:', error);
