@@ -66,6 +66,7 @@ const scheduledMeetings = new Map(); // meetingId -> { time, topic, channelId, t
 // Personal reminder tracking (Note: Data is lost on restart due to Render's ephemeral filesystem)
 const userReminders = new Map(); // userId -> { time: '20:00', customMessage: null, active: true }
 const conversationStates = new Map(); // userId -> { step: 'awaiting_time' | 'awaiting_message', time: string }
+const userHasChatted = new Set(); // Track users who have already chatted (for first-time AI context)
 
 // Send welcome message to clan members on bot startup
 async function sendWelcomeMessages() {
@@ -708,23 +709,25 @@ client.on(Events.MessageCreate, async (message) => {
                 try {
                     await message.channel.sendTyping();
                     
-                    const aiResponse = await aiService.askQuestion(
-                        `You are BeeLert, a friendly Discord productivity bot assistant with these capabilities:\n\n` +
-                        `FEATURES:\n` +
-                        `- Daily reminders (users set with !reminder command, then provide time like "9:00 PM")\n` +
-                        `- Meeting scheduling in server channels\n` +
-                        `- AI chat & motivation\n` +
-                        `- Voice meeting tracking\n\n` +
-                        `COMMANDS:\n` +
-                        `- !reminder: Start reminder setup (asks for time, then optional custom message)\n` +
-                        `- !help: Show all commands\n` +
-                        `- !status: View current reminder settings\n` +
-                        `- !pause/!resume: Control reminders\n` +
-                        `- !stop: Delete reminder\n\n` +
-                        `USER SAYS: "${message.content}"\n\n` +
-                        `Respond naturally and helpfully. If they're asking about reminders, explain the !reminder setup process step-by-step. ` +
-                        `For errors/issues, troubleshoot clearly. Be friendly, concise (under 150 words), and actionable.`
-                    );
+                    // Check if this is first time user is chatting
+                    const isFirstChat = !userHasChatted.has(userId);
+                    if (isFirstChat) {
+                        userHasChatted.add(userId); // Mark as chatted
+                    }
+                    
+                    const contextPrompt = isFirstChat 
+                        ? `You are BeeLert, a friendly Discord productivity bot. This is the user's FIRST chat with you.\n\n` +
+                          `IMPORTANT: Mention once that they can type !reminder to set up daily reminders (you'll ask for time like "9:00 PM", then optional custom message).\n\n` +
+                          `FEATURES: Daily reminders, Meeting scheduling, AI chat, Voice tracking\n` +
+                          `COMMANDS: !reminder, !help, !status, !pause, !resume, !stop\n\n` +
+                          `USER SAYS: "${message.content}"\n\n` +
+                          `Respond naturally, mention the !reminder feature briefly, keep under 100 words.`
+                        : `You are BeeLert, a friendly Discord productivity bot assistant.\n\n` +
+                          `USER SAYS: "${message.content}"\n\n` +
+                          `Respond naturally and helpfully. Don't repeat reminder setup instructions unless they specifically ask about reminders. ` +
+                          `Be conversational, friendly, and concise (under 80 words).`;
+                    
+                    const aiResponse = await aiService.askQuestion(contextPrompt);
                     
                     await message.reply(
                         aiResponse || 
