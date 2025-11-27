@@ -812,9 +812,6 @@ client.on(Events.MessageCreate, async (message) => {
                     createdAt: Date.now()
                 });
                 
-                // Save to file
-                saveReminders();
-                
                 // Clear conversation state
                 conversationStates.delete(userId);
                 
@@ -857,7 +854,6 @@ client.on(Events.MessageCreate, async (message) => {
                     return;
                 }
                 reminder.active = false;
-                saveReminders();
                 await message.reply("⏸️ Reminders paused. Type `!resume` to turn them back on.");
                 return;
             }
@@ -870,7 +866,6 @@ client.on(Events.MessageCreate, async (message) => {
                     return;
                 }
                 reminder.active = true;
-                saveReminders();
                 await message.reply("✅ Reminders resumed!");
                 return;
             }
@@ -910,7 +905,6 @@ client.on(Events.MessageCreate, async (message) => {
                     return;
                 }
                 userReminders.delete(userId);
-                saveReminders();
                 await message.reply("❌ Daily reminder deleted. Type `reminder` anytime to set up again.");
                 console.log(`🗑️ Reminder deleted for ${message.author.username}`);
                 return;
