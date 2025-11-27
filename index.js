@@ -703,48 +703,42 @@ client.on(Events.MessageCreate, async (message) => {
                 return;
             }
             
-            // If in conversation state, handle only conversation
-            if (state) {
-                // Continue with time/message handling below
-                // Don't process as AI query
-            } else {
-                // No conversation state - use AI for everything except specific commands
-                if (!['!help', '!status', '!pause', '!resume', '!change time', '!change message', '!stop', '!reminder'].includes(content)) {
-                    try {
-                        await message.channel.sendTyping();
-                        
-                        const aiResponse = await aiService.askQuestion(
-                            `You are BeeLert, a friendly Discord productivity bot assistant with these capabilities:\n\n` +
-                            `FEATURES:\n` +
-                            `- Daily reminders (users set with !reminder command, then provide time like "9:00 PM")\n` +
-                            `- Meeting scheduling in server channels\n` +
-                            `- AI chat & motivation\n` +
-                            `- Voice meeting tracking\n\n` +
-                            `COMMANDS:\n` +
-                            `- !reminder: Start reminder setup (asks for time, then optional custom message)\n` +
-                            `- !help: Show all commands\n` +
-                            `- !status: View current reminder settings\n` +
-                            `- !pause/!resume: Control reminders\n` +
-                            `- !stop: Delete reminder\n\n` +
-                            `USER SAYS: "${message.content}"\n\n` +
-                            `Respond naturally and helpfully. If they're asking about reminders, explain the !reminder setup process step-by-step. ` +
-                            `For errors/issues, troubleshoot clearly. Be friendly, concise (under 150 words), and actionable.`
-                        );
-                        
-                        await message.reply(
-                            aiResponse || 
-                            "👋 Hi! I'm BeeLert, your productivity assistant!\n\n" +
-                            "Type `!help` to see all commands or `!reminder` to set up daily reminders!"
-                        );
-                        return;
-                    } catch (aiError) {
-                        console.error('AI response error in DM:', aiError);
-                        await message.reply(
-                            "👋 Hi! I'm BeeLert, your productivity assistant!\n\n" +
-                            "Type `!help` to see all commands or `!reminder` to set up daily reminders!"
-                        );
-                        return;
-                    }
+            // If NOT in conversation state and NOT a command - use AI
+            if (!state && !['!help', '!status', '!pause', '!resume', '!change time', '!change message', '!stop', '!reminder'].includes(content)) {
+                try {
+                    await message.channel.sendTyping();
+                    
+                    const aiResponse = await aiService.askQuestion(
+                        `You are BeeLert, a friendly Discord productivity bot assistant with these capabilities:\n\n` +
+                        `FEATURES:\n` +
+                        `- Daily reminders (users set with !reminder command, then provide time like "9:00 PM")\n` +
+                        `- Meeting scheduling in server channels\n` +
+                        `- AI chat & motivation\n` +
+                        `- Voice meeting tracking\n\n` +
+                        `COMMANDS:\n` +
+                        `- !reminder: Start reminder setup (asks for time, then optional custom message)\n` +
+                        `- !help: Show all commands\n` +
+                        `- !status: View current reminder settings\n` +
+                        `- !pause/!resume: Control reminders\n` +
+                        `- !stop: Delete reminder\n\n` +
+                        `USER SAYS: "${message.content}"\n\n` +
+                        `Respond naturally and helpfully. If they're asking about reminders, explain the !reminder setup process step-by-step. ` +
+                        `For errors/issues, troubleshoot clearly. Be friendly, concise (under 150 words), and actionable.`
+                    );
+                    
+                    await message.reply(
+                        aiResponse || 
+                        "👋 Hi! I'm BeeLert, your productivity assistant!\n\n" +
+                        "Type `!help` to see all commands or `!reminder` to set up daily reminders!"
+                    );
+                    return;
+                } catch (aiError) {
+                    console.error('AI response error in DM:', aiError);
+                    await message.reply(
+                        "👋 Hi! I'm BeeLert, your productivity assistant!\n\n" +
+                        "Type `!help` to see all commands or `!reminder` to set up daily reminders!"
+                    );
+                    return;
                 }
             }
             
