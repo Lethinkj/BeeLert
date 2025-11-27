@@ -63,78 +63,35 @@ const MINIMUM_MEETING_DURATION = 10 * 60 * 1000; // 10 minutes in milliseconds
 // Scheduled meetings tracking
 const scheduledMeetings = new Map(); // meetingId -> { time, topic, channelId, timeoutId, creatorId, confirmationMsg }
 
-// Personal reminder tracking
+// Personal reminder tracking (Note: Data is lost on restart due to Render's ephemeral filesystem)
 const userReminders = new Map(); // userId -> { time: '20:00', customMessage: null, active: true }
 const conversationStates = new Map(); // userId -> { step: 'awaiting_time' | 'awaiting_message', time: string }
-const fs = require('fs');
-const REMINDERS_FILE = './user-reminders.json';
 
-// Load reminders from file on startup
-function loadReminders() {
-    try {
-        if (fs.existsSync(REMINDERS_FILE)) {
-            const data = fs.readFileSync(REMINDERS_FILE, 'utf8');
-            const savedReminders = JSON.parse(data);
-            savedReminders.forEach(([userId, settings]) => {
-                userReminders.set(userId, settings);
-            });
-            console.log(`📁 Loaded ${userReminders.size} user reminders from file`);
-        }
-    } catch (error) {
-        console.error('Error loading reminders:', error);
-    }
-}
-
-// Save reminders to file
-function saveReminders() {
-    try {
-        const data = JSON.stringify(Array.from(userReminders.entries()));
-        fs.writeFileSync(REMINDERS_FILE, data);
-    } catch (error) {
-        console.error('Error saving reminders:', error);
-    }
-}
-
-// Send welcome message to new clan members
+// Send welcome message to clan members on bot startup
 async function sendWelcomeMessages() {
-    console.log(`📢 Sending welcome/restart messages to ${CLAN_MEMBERS.length} clan members...`);
+    console.log(`📢 Sending startup messages to ${CLAN_MEMBERS.length} clan members...`);
     
     for (const userId of CLAN_MEMBERS) {
         try {
             const user = await client.users.fetch(userId);
-            const hasReminder = userReminders.has(userId);
             
-            if (!hasReminder) {
-                // First time / new user message
-                await user.send(
-                    "🎉 **Welcome to BeeLert Bot!**\n\n" +
-                    "This bot helps you stay productive and organized!\n\n" +
-                    "**Features:**\n" +
-                    "📅 Schedule team meetings\n" +
-                    "⏰ Get daily reminder messages\n" +
-                    "🤖 AI-powered motivation\n" +
-                    "📊 Voice meeting tracking\n\n" +
-                    "**Get Started:**\n" +
-                    "• Type `reminder` to set up your daily reminder\n" +
-                    "• Type `help` to see all available commands\n\n" +
-                    "Let's boost your productivity! 🚀"
-                );
-                console.log(`✅ Welcome message sent to ${user.username}`);
-            } else {
-                // Restart message for existing users
-                const settings = userReminders.get(userId);
-                await user.send(
-                    "⚠️ **Bot Restart Notice**\n\n" +
-                    "Sorry for the inconvenience! There was a technical issue and the bot restarted.\n\n" +
-                    "📋 **Your reminder settings:**\n" +
-                    `⏰ Time: ${settings.time} IST\n` +
-                    `📝 Message: ${settings.customMessage || 'Default'}\n` +
-                    `🔔 Status: ${settings.active ? '✅ Active' : '⏸️ Paused'}\n\n` +
-                    "⚠️ **Please note:** If your reminder was active, please reschedule it by typing `reminder` again.\n\n" +
-                    "Sorry for the inconvenience! Type `help` for available commands."
-                );
-                console.log(`✅ Restart notice sent to ${user.username}`);
-            }
+            await user.send(
+                "👋 **Hey! BeeLert Bot is ready!**\n\n" +
+                "I'm your AI productivity assistant. Just chat with me naturally and I'll help you out!\n\n" +
+                "**Quick Start - Set Up Daily Reminders:**\n" +
+                "1️⃣ Send me: `!reminder`\n" +
+                "2️⃣ Tell me your preferred time (e.g., `9:00 PM`)\n" +
+                "3️⃣ Optionally customize your reminder message\n" +
+                "4️⃣ Done! I'll remind you daily at that time\n\n" +
+                "**What I Can Do:**\n" +
+                "💬 Chat naturally - ask me anything!\n" +
+                "⏰ Daily reminders - `!reminder` to set up\n" +
+                "📅 Meeting scheduling - use the server channel\n" +
+                "🎯 Motivation & productivity tips\n" +
+                "🛠️ Troubleshooting & help\n\n" +
+                "Type `!help` for commands, or just start chatting! 😊"
+            );
+            console.log(`✅ Startup message sent to ${user.username}`);
             
             await new Promise(resolve => setTimeout(resolve, 1500)); // Rate limit
         } catch (error) {
@@ -348,10 +305,7 @@ client.once(Events.ClientReady, async (c) => {
     console.log(`${c.user.tag} has connected to Discord!`);
     console.log(`Bot is ready at ${formatISTTime(getISTTime())}`);
     
-    // Load saved reminders
-    loadReminders();
-    
-    // Send welcome/restart messages to all clan members
+    // Send welcome messages to all clan members on startup
     setTimeout(() => sendWelcomeMessages(), 3000);
 
     // Update bot status
@@ -713,29 +667,32 @@ client.on(Events.MessageCreate, async (message) => {
         
         try {
             // Help command
-            if (content === 'help') {
+            if (content === '!help') {
                 await message.reply(
-                    "🤖 **BeeLert Personal Reminder Help**\n\n" +
-                    "**Setup Your Reminder:**\n" +
-                    "• Type `reminder` to start setup\n" +
+                    "🤖 **BeeLert Bot Help**\n\n" +
+                    "**Setup Daily Reminder:**\n" +
+                    "• Type `!reminder` to start setup\n" +
                     "• I'll guide you through choosing your time\n" +
                     "• Optionally set a custom message\n\n" +
                     "**Manage Your Reminder:**\n" +
-                    "• `status` - View your current settings\n" +
-                    "• `pause` - Temporarily pause reminders\n" +
-                    "• `resume` - Resume paused reminders\n" +
-                    "• `change time` - Update reminder time\n" +
-                    "• `change message` - Update custom message\n" +
-                    "• `stop` - Delete your reminder completely\n\n" +
+                    "• `!status` - View your current settings\n" +
+                    "• `!pause` - Temporarily pause reminders\n" +
+                    "• `!resume` - Resume paused reminders\n" +
+                    "• `!change time` - Update reminder time\n" +
+                    "• `!change message` - Update custom message\n" +
+                    "• `!stop` - Delete your reminder completely\n\n" +
                     "**During Setup:**\n" +
                     "• `cancel` - Cancel current setup\n\n" +
-                    "💡 Your reminders are saved and persist across bot restarts!"
+                    "**Chat with AI:**\n" +
+                    "• Just send any message and I'll respond!\n" +
+                    "• Ask questions, get motivation, or chat casually\n\n" +
+                    "⚠️ Note: Reminders reset on bot restart (hosting limitation)"
                 );
                 return;
             }
             
-            // Start reminder setup
-            if (content === 'reminder' && !state) {
+            // Start reminder setup with !reminder command
+            if (content === '!reminder') {
                 conversationStates.set(userId, { step: 'awaiting_time' });
                 await message.reply(
                     "Hi! I can remind you to post your daily progress. 📝\n\n" +
@@ -746,11 +703,56 @@ client.on(Events.MessageCreate, async (message) => {
                 return;
             }
             
+            // If in conversation state, handle only conversation
+            if (state) {
+                // Continue with time/message handling below
+                // Don't process as AI query
+            } else {
+                // No conversation state - use AI for everything except specific commands
+                if (!['!help', '!status', '!pause', '!resume', '!change time', '!change message', '!stop', '!reminder'].includes(content)) {
+                    try {
+                        await message.channel.sendTyping();
+                        
+                        const aiResponse = await aiService.askQuestion(
+                            `You are BeeLert, a friendly Discord productivity bot assistant with these capabilities:\n\n` +
+                            `FEATURES:\n` +
+                            `- Daily reminders (users set with !reminder command, then provide time like "9:00 PM")\n` +
+                            `- Meeting scheduling in server channels\n` +
+                            `- AI chat & motivation\n` +
+                            `- Voice meeting tracking\n\n` +
+                            `COMMANDS:\n` +
+                            `- !reminder: Start reminder setup (asks for time, then optional custom message)\n` +
+                            `- !help: Show all commands\n` +
+                            `- !status: View current reminder settings\n` +
+                            `- !pause/!resume: Control reminders\n` +
+                            `- !stop: Delete reminder\n\n` +
+                            `USER SAYS: "${message.content}"\n\n` +
+                            `Respond naturally and helpfully. If they're asking about reminders, explain the !reminder setup process step-by-step. ` +
+                            `For errors/issues, troubleshoot clearly. Be friendly, concise (under 150 words), and actionable.`
+                        );
+                        
+                        await message.reply(
+                            aiResponse || 
+                            "👋 Hi! I'm BeeLert, your productivity assistant!\n\n" +
+                            "Type `!help` to see all commands or `!reminder` to set up daily reminders!"
+                        );
+                        return;
+                    } catch (aiError) {
+                        console.error('AI response error in DM:', aiError);
+                        await message.reply(
+                            "👋 Hi! I'm BeeLert, your productivity assistant!\n\n" +
+                            "Type `!help` to see all commands or `!reminder` to set up daily reminders!"
+                        );
+                        return;
+                    }
+                }
+            }
+            
             // Handle time input
             if (state && state.step === 'awaiting_time') {
                 if (content === 'cancel') {
                     conversationStates.delete(userId);
-                    await message.reply("❌ Setup cancelled. Type `reminder` to start again.");
+                    await message.reply("❌ Setup cancelled. Type `!reminder` to start again.");
                     return;
                 }
                 
@@ -833,10 +835,10 @@ client.on(Events.MessageCreate, async (message) => {
             }
             
             // Status command
-            if (content === 'status') {
+            if (content === '!status') {
                 const reminder = userReminders.get(userId);
                 if (!reminder) {
-                    await message.reply("❌ You don't have a reminder set. Type `reminder` to create one.");
+                    await message.reply("❌ You don't have a reminder set. Type `!reminder` to create one.");
                     return;
                 }
                 
@@ -845,29 +847,29 @@ client.on(Events.MessageCreate, async (message) => {
                     `⏰ **Time:** ${reminder.time} IST\n` +
                     `📝 **Message:** ${reminder.customMessage || 'Default'}\n` +
                     `🔔 **Status:** ${reminder.active ? '✅ Active' : '⏸️ Paused'}\n\n` +
-                    "Type `help` for available commands"
+                    "Type `!help` for available commands"
                 );
                 return;
             }
             
             // Pause command
-            if (content === 'pause') {
+            if (content === '!pause') {
                 const reminder = userReminders.get(userId);
                 if (!reminder) {
-                    await message.reply("❌ You don't have a reminder set. Type `reminder` to create one.");
+                    await message.reply("❌ You don't have a reminder set. Type `!reminder` to create one.");
                     return;
                 }
                 reminder.active = false;
                 saveReminders();
-                await message.reply("⏸️ Reminders paused. Type `resume` to turn them back on.");
+                await message.reply("⏸️ Reminders paused. Type `!resume` to turn them back on.");
                 return;
             }
             
             // Resume command
-            if (content === 'resume') {
+            if (content === '!resume') {
                 const reminder = userReminders.get(userId);
                 if (!reminder) {
-                    await message.reply("❌ You don't have a reminder set. Type `reminder` to create one.");
+                    await message.reply("❌ You don't have a reminder set. Type `!reminder` to create one.");
                     return;
                 }
                 reminder.active = true;
@@ -877,10 +879,10 @@ client.on(Events.MessageCreate, async (message) => {
             }
             
             // Change time
-            if (content === 'change time') {
+            if (content === '!change time') {
                 const reminder = userReminders.get(userId);
                 if (!reminder) {
-                    await message.reply("❌ You don't have a reminder set. Type `reminder` to create one.");
+                    await message.reply("❌ You don't have a reminder set. Type `!reminder` to create one.");
                     return;
                 }
                 conversationStates.set(userId, { step: 'awaiting_time' });
@@ -889,10 +891,10 @@ client.on(Events.MessageCreate, async (message) => {
             }
             
             // Change message
-            if (content === 'change message') {
+            if (content === '!change message') {
                 const reminder = userReminders.get(userId);
                 if (!reminder) {
-                    await message.reply("❌ You don't have a reminder set. Type `reminder` to create one.");
+                    await message.reply("❌ You don't have a reminder set. Type `!reminder` to create one.");
                     return;
                 }
                 conversationStates.set(userId, { 
@@ -904,7 +906,7 @@ client.on(Events.MessageCreate, async (message) => {
             }
             
             // Stop/delete reminder
-            if (content === 'stop') {
+            if (content === '!stop') {
                 const reminder = userReminders.get(userId);
                 if (!reminder) {
                     await message.reply("❌ You don't have a reminder set.");
