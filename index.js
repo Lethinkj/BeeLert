@@ -616,6 +616,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
             
             // Schedule Meeting button
             if (interaction.customId === 'schedule_meeting') {
+                const channelList = VOICE_CHANNELS.map((ch, idx) => `${idx + 1}. ${ch.name}`).join('\n');
+                
                 const modal = new ModalBuilder()
                     .setCustomId('schedule_modal')
                     .setTitle('📅 Schedule a Meeting');
@@ -629,9 +631,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
                 const channelInput = new TextInputBuilder()
                     .setCustomId('meeting_channel')
-                    .setLabel('Voice Channel (Lounge/Aura/Room1/Room2)')
+                    .setLabel(`Channel (Type: 1-${VOICE_CHANNELS.length})`)
                     .setStyle(TextInputStyle.Short)
-                    .setPlaceholder('Lounge')
+                    .setPlaceholder(`1=Lounge 2=Aura 3=Room1 4=Room2`)
                     .setRequired(true);
 
                 const dateInput = new TextInputBuilder()
@@ -808,25 +810,23 @@ client.on(Events.InteractionCreate, async (interaction) => {
         // Handle modal submissions
         if (interaction.isModalSubmit() && interaction.customId === 'schedule_modal') {
             const topic = interaction.fields.getTextInputValue('meeting_topic');
-            const channelName = interaction.fields.getTextInputValue('meeting_channel').trim().toLowerCase();
+            const channelInput = interaction.fields.getTextInputValue('meeting_channel').trim();
             const dateStr = interaction.fields.getTextInputValue('meeting_date').trim();
             const startTimeStr = interaction.fields.getTextInputValue('meeting_start_time');
             const endTimeStr = interaction.fields.getTextInputValue('meeting_end_time');
 
             try {
-                // Find voice channel
-                const channel = VOICE_CHANNELS.find(ch => 
-                    ch.name.toLowerCase().includes(channelName) || 
-                    channelName.includes(ch.name.toLowerCase().split(' ')[0])
-                );
-                
-                if (!channel) {
+                // Parse channel number
+                const channelNum = parseInt(channelInput);
+                if (isNaN(channelNum) || channelNum < 1 || channelNum > VOICE_CHANNELS.length) {
                     return interaction.reply({
-                        content: `❌ Invalid channel. Available channels:\n${VOICE_CHANNELS.map(ch => `• ${ch.name}`).join('\n')}`,
+                        content: `❌ Invalid channel number. Please enter 1-${VOICE_CHANNELS.length}:\n${VOICE_CHANNELS.map((ch, i) => `${i + 1}. ${ch.name}`).join('\n')}`,
                         flags: MessageFlags.Ephemeral
                     });
                 }
-
+                
+                const channel = VOICE_CHANNELS[channelNum - 1];
+                
                 // Parse date (use today if not provided)
                 const now = new Date();
                 let targetDate;
@@ -1169,7 +1169,7 @@ client.on(Events.MessageCreate, async (message) => {
                     "🎉 **All set!** Your daily reminder is configured.\n\n" +
                     `⏰ **Time:** ${state.time} IST\n` +
                     `📝 **Message:** ${displayMessage}\n\n` +
-                    "**Commands:** Type `help` to see all commands"
+                    "**Commands:** Type `!help` to see all commands"
                 );
                 
                 console.log(`✅ Reminder created for ${message.author.username} at ${state.time}`);
