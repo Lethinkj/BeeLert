@@ -73,45 +73,12 @@ const MINIMUM_MEETING_DURATION = 10 * 60 * 1000; // 10 minutes in milliseconds
 
 // Scheduled meetings tracking
 const scheduledMeetings = new Map(); // meetingId -> { time, topic, channelId, timeoutId, creatorId, confirmationMsg, startTime, endTime, date, status }
-const activeMeetings = new Map(); // meetingId -> { actualStartTime, participants: Map(userId -> {username, joinedAt, leftAt, totalSeconds}) }
+const activeMeetings = new Map(); // meetingId -> { actualStartTime, participants: Map(userId -> {username, joinedAt, leftAt, totalSeconds}), twoMinCheckDone: false }
 
 // Personal reminder tracking (Note: Data is lost on restart due to Render's ephemeral filesystem)
 const userReminders = new Map(); // userId -> { time: '20:00', customMessage: null, active: true }
 const conversationStates = new Map(); // userId -> { step: 'awaiting_time' | 'awaiting_message', time: string }
 const userHasChatted = new Set(); // Track users who have already chatted (for first-time AI context)
-
-// Send welcome message to clan members on bot startup
-async function sendWelcomeMessages() {
-    console.log(`📢 Sending startup messages to ${CLAN_MEMBERS.length} clan members...`);
-    
-    for (const userId of CLAN_MEMBERS) {
-        try {
-            const user = await client.users.fetch(userId);
-            
-            await user.send(
-                "👋 **Hey! BeeLert Bot is ready!**\n\n" +
-                "I'm your AI productivity assistant. Just chat with me naturally and I'll help you out!\n\n" +
-                "**Quick Start - Set Up Daily Reminders:**\n" +
-                "1️⃣ Send me: `!reminder`\n" +
-                "2️⃣ Tell me your preferred time (e.g., `9:00 PM`)\n" +
-                "3️⃣ Optionally customize your reminder message\n" +
-                "4️⃣ Done! I'll remind you daily at that time\n\n" +
-                "**What I Can Do:**\n" +
-                "💬 Chat naturally - ask me anything!\n" +
-                "⏰ Daily reminders - `!reminder` to set up\n" +
-                "📅 Meeting scheduling - use the server channel\n" +
-                "🎯 Motivation & productivity tips\n" +
-                "🛠️ Troubleshooting & help\n\n" +
-                "Type `!help` for commands, or just start chatting! 😊"
-            );
-            console.log(`✅ Startup message sent to ${user.username}`);
-            
-            await new Promise(resolve => setTimeout(resolve, 1500)); // Rate limit
-        } catch (error) {
-            console.error(`❌ Cannot message user ${userId}:`, error.message);
-        }
-    }
-}
 
 // Get AI-generated motivational content
 async function getAIMotivation() {
@@ -294,7 +261,9 @@ async function startAutomatedTracking(meeting, meetingId) {
         activeMeetings.set(meetingId, {
             ...meeting,
             actualStartTime: startTime,
-            participants: participants
+            participants: participants,
+            twoMinCheckDone: false,
+            trackingMode: 'scheduled' // Will change to 'continuous' after 2 min if people present
         });
         
         meeting.status = 'active';
@@ -521,9 +490,7 @@ async function sendDailyUpdate() {
 client.once(Events.ClientReady, async (c) => {
     console.log(`${c.user.tag} has connected to Discord!`);
     console.log(`Bot is ready at ${formatISTTime(getISTTime())}`);
-    
-    // Send welcome messages to all clan members on startup
-    setTimeout(() => sendWelcomeMessages(), 3000);
+    // Removed: setTimeout(() => sendWelcomeMessages(), 3000);
 
     // Update bot status
     botStatus.isOnline = true;
@@ -582,9 +549,47 @@ client.once(Events.ClientReady, async (c) => {
             if (meeting.status === 'scheduled' && meeting.startTime.getTime() <= now) {
                 await startAutomatedTracking(meeting, meetingId);
             }
+        }
+        
+        // Check active meetings for 2-minute check and empty channel detection
+        for (const [meetingId, activeMeeting] of activeMeetings.entries()) {
+            const timeSinceStart = now - activeMeeting.actualStartTime;
+            const twoMinutes = 2 * 60 * 1000;
             
-            // Check if it's time to END tracking
-            if (meeting.status === 'active' && meeting.endTime.getTime() <= now) {
+            // 2-minute check: Are there participants?
+            if (!activeMeeting.twoMinCheckDone && timeSinceStart >= twoMinutes) {
+                activeMeeting.twoMinCheckDone = true;
+                
+                const channel = await client.channels.fetch(activeMeeting.channelId);
+                const currentMembers = channel.members.filter(m => !m.user.bot);
+                
+                if (currentMembers.size > 0) {
+                    // People still present after 2 min - switch to continuous tracking
+                    activeMeeting.trackingMode = 'continuous';
+                    console.log(`✅ ${activeMeeting.topic}: ${currentMembers.size} members present after 2 min - continuing tracking until all leave`);
+                } else {
+                    // No one present after 2 min - end meeting
+                    console.log(`⚠️ ${activeMeeting.topic}: No participants after 2 min - ending meeting`);
+                    await endAutomatedTracking(meetingId);
+                }
+            }
+            
+            // Continuous tracking mode: Check if channel is empty
+            if (activeMeeting.trackingMode === 'continuous' && activeMeeting.twoMinCheckDone) {
+                const channel = await client.channels.fetch(activeMeeting.channelId);
+                const currentMembers = channel.members.filter(m => !m.user.bot);
+                
+                if (currentMembers.size === 0) {
+                    // Everyone has left - end meeting
+                    console.log(`✅ ${activeMeeting.topic}: All participants have left - ending meeting`);
+                    await endAutomatedTracking(meetingId);
+                }
+            }
+            
+            // Fallback: Still end at scheduled end time if somehow still running
+            const scheduledMeeting = scheduledMeetings.get(meetingId);
+            if (scheduledMeeting && scheduledMeeting.endTime.getTime() <= now && activeMeeting.trackingMode === 'scheduled') {
+                console.log(`⏰ ${activeMeeting.topic}: Reached scheduled end time - forcing end`);
                 await endAutomatedTracking(meetingId);
             }
         }
@@ -1429,7 +1434,13 @@ async function handleScheduledMeetingTracking(userId, oldState, newState) {
                 participant.joinedAt = now;
                 participant.leftAt = null;
             }
-            console.log(`➕ ${username} joined ${meeting.topic} (scheduled meeting)`);
+            
+            // If in continuous mode and someone joins, keep tracking
+            if (meeting.trackingMode === 'continuous') {
+                console.log(`➕ ${username} joined ${meeting.topic} (continuing tracking)`);
+            } else {
+                console.log(`➕ ${username} joined ${meeting.topic} (scheduled meeting)`);
+            }
         }
         
         // User LEFT the monitored meeting channel
