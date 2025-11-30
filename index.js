@@ -32,6 +32,14 @@ const MEETING_SUMMARY_CHANNEL_ID = process.env.MEETING_SUMMARY_CHANNEL_ID || '14
 const SCHEDULE_MEET_CHANNEL_ID = process.env.SCHEDULE_MEET_CHANNEL_ID || '1443135153185493033';
 const ROLE_NAME = process.env.ROLE_NAME || 'Basher';
 
+// Available voice channels for scheduled meetings
+const VOICE_CHANNELS = [
+    { id: '1350324320672546826', name: 'Lounge' },
+    { id: '1350324320672546827', name: 'Aura-7f Space' },
+    { id: '1350324320672546828', name: 'Meeting Room 1' },
+    { id: '1367146219633119354', name: 'Meeting Room 2' }
+];
+
 // Clan member IDs
 const CLAN_MEMBERS = [
     '1259881373309861888', // Alisha
@@ -61,7 +69,8 @@ const voiceMeetings = new Map(); // channelId -> { startTime, participants: Map(
 const MINIMUM_MEETING_DURATION = 10 * 60 * 1000; // 10 minutes in milliseconds
 
 // Scheduled meetings tracking
-const scheduledMeetings = new Map(); // meetingId -> { time, topic, channelId, timeoutId, creatorId, confirmationMsg }
+const scheduledMeetings = new Map(); // meetingId -> { time, topic, channelId, timeoutId, creatorId, confirmationMsg, startTime, endTime, date, status }
+const activeMeetings = new Map(); // meetingId -> { actualStartTime, participants: Map(userId -> {username, joinedAt, leftAt, totalSeconds}) }
 
 // Personal reminder tracking (Note: Data is lost on restart due to Render's ephemeral filesystem)
 const userReminders = new Map(); // userId -> { time: '20:00', customMessage: null, active: true }
@@ -258,6 +267,214 @@ async function sendMeetingReminder(topic, meetingId) {
     }
 }
 
+// Start automated meeting tracking
+async function startAutomatedTracking(meeting, meetingId) {
+    try {
+        const channel = await client.channels.fetch(meeting.channelId);
+        const startTime = Date.now();
+        
+        // Get members ALREADY in channel
+        const presentMembers = channel.members;
+        const participants = new Map();
+        
+        presentMembers.forEach(member => {
+            if (!member.user.bot) {
+                participants.set(member.id, {
+                    username: member.user.username,
+                    joinedAt: startTime,
+                    leftAt: null,
+                    totalSeconds: 0,
+                    sessions: [] // Track multiple sessions if they disconnect/reconnect
+                });
+                console.log(`👤 ${member.user.username} - present at meeting start`);
+            }
+        });
+        
+        activeMeetings.set(meetingId, {
+            ...meeting,
+            actualStartTime: startTime,
+            participants: participants
+        });
+        
+        meeting.status = 'active';
+        
+        console.log(`🎬 Started tracking: ${meeting.topic} in ${meeting.channelName} (${participants.size} already present)`);
+        
+        // Notify in general channel
+        const generalChannel = await client.channels.fetch(CHANNEL_ID);
+        const role = generalChannel.guild.roles.cache.find(r => r.name === ROLE_NAME);
+        
+        await generalChannel.send(
+            `${role ? `<@&${role.id}>` : `@${ROLE_NAME}`}\n\n` +
+            `🎬 **Meeting Started - Attendance Tracking Active**\n\n` +
+            `📝 ${meeting.topic}\n` +
+            `🎙️ ${meeting.channelName}\n` +
+            `👥 ${participants.size} members already present\n\n` +
+            `⏱️ All attendance is being tracked automatically.`
+        );
+        
+    } catch (error) {
+        console.error('Error starting automated tracking:', error);
+    }
+}
+
+// End automated meeting tracking
+async function endAutomatedTracking(meetingId) {
+    try {
+        const meeting = activeMeetings.get(meetingId);
+        if (!meeting) return;
+        
+        const endTime = Date.now();
+        const channel = await client.channels.fetch(meeting.channelId);
+        
+        // Calculate final times for members still in channel
+        const stillPresent = channel.members;
+        meeting.participants.forEach((participant, userId) => {
+            const isStillInChannel = stillPresent.has(userId);
+            
+            if (!participant.leftAt && isStillInChannel) {
+                // Member is still in channel - calculate their final time
+                const sessionDuration = Math.floor((endTime - participant.joinedAt) / 1000);
+                participant.totalSeconds += sessionDuration;
+                participant.leftAt = endTime;
+                participant.sessions.push({
+                    joinedAt: participant.joinedAt,
+                    leftAt: endTime,
+                    duration: sessionDuration
+                });
+            }
+        });
+        
+        // Generate and post summary
+        await generateAttendanceSummary(meeting, meetingId);
+        
+        // Cleanup
+        activeMeetings.delete(meetingId);
+        meeting.status = 'completed';
+        
+        // Delete confirmation message
+        if (meeting.confirmationMsg) {
+            try {
+                await meeting.confirmationMsg.delete();
+                console.log(`🗑️ Deleted confirmation message for: ${meeting.topic}`);
+            } catch (err) {
+                console.error('Error deleting confirmation message:', err);
+            }
+        }
+        
+        console.log(`✅ Meeting ended and summary posted: ${meeting.topic}`);
+        
+    } catch (error) {
+        console.error('Error ending automated tracking:', error);
+    }
+}
+
+// Generate attendance summary for scheduled meeting
+async function generateAttendanceSummary(meeting, meetingId) {
+    try {
+        const summaryChannel = await client.channels.fetch(MEETING_SUMMARY_CHANNEL_ID);
+        
+        const totalDuration = meeting.endTime.getTime() - meeting.actualStartTime;
+        const totalMinutes = Math.floor(totalDuration / (1000 * 60));
+        const totalHours = Math.floor(totalMinutes / 60);
+        const remainingMinutes = totalMinutes % 60;
+        
+        // Sort participants by total time (descending)
+        const sortedParticipants = Array.from(meeting.participants.entries())
+            .sort((a, b) => b[1].totalSeconds - a[1].totalSeconds);
+        
+        // Separate into "present from start" and "joined later"
+        const presentFromStart = [];
+        const joinedLater = [];
+        
+        sortedParticipants.forEach(([userId, participant]) => {
+            const timeDiff = participant.sessions[0]?.joinedAt - meeting.actualStartTime || 0;
+            if (timeDiff < 60000) { // Within 1 minute of start = "from start"
+                presentFromStart.push({ userId, ...participant });
+            } else {
+                joinedLater.push({ userId, ...participant });
+            }
+        });
+        
+        // Build summary message
+        let summary = `📊 **Automated Meeting Report**\n\n`;
+        summary += `📝 **${meeting.topic}**\n`;
+        summary += `🎙️ Channel: ${meeting.channelName}\n`;
+        summary += `📅 ${new Date(meeting.actualStartTime).toLocaleDateString('en-IN', { 
+            timeZone: 'Asia/Kolkata',
+            weekday: 'long',
+            month: 'long',
+            day: 'numeric',
+            year: 'numeric'
+        })}\n`;
+        summary += `🕐 ${new Date(meeting.actualStartTime).toLocaleTimeString('en-IN', {
+            timeZone: 'Asia/Kolkata',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: true
+        })} - ${new Date(meeting.endTime).toLocaleTimeString('en-IN', {
+            timeZone: 'Asia/Kolkata',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: true
+        })} IST`;
+        summary += ` (${totalHours}h ${remainingMinutes}m)\n\n`;
+        summary += `👥 **Attendance Summary:**\n\n`;
+        
+        if (sortedParticipants.length === 0) {
+            summary += `❌ No participants joined this meeting.\n`;
+        } else {
+            // Present from start
+            if (presentFromStart.length > 0) {
+                summary += `✅ **Present from start (${presentFromStart.length} members):**\n`;
+                presentFromStart.forEach(p => {
+                    const mins = Math.floor(p.totalSeconds / 60);
+                    const secs = p.totalSeconds % 60;
+                    const percentage = Math.round((p.totalSeconds / (totalDuration / 1000)) * 100);
+                    const badge = percentage >= 95 ? ' ⭐' : '';
+                    summary += `• **${p.username}** - ${mins}m ${secs}s (${percentage}%)${badge}\n`;
+                });
+                summary += `\n`;
+            }
+            
+            // Joined later
+            if (joinedLater.length > 0) {
+                summary += `⏰ **Joined after start (${joinedLater.length} members):**\n`;
+                joinedLater.forEach(p => {
+                    const mins = Math.floor(p.totalSeconds / 60);
+                    const secs = p.totalSeconds % 60;
+                    const percentage = Math.round((p.totalSeconds / (totalDuration / 1000)) * 100);
+                    const joinTime = new Date(p.sessions[0]?.joinedAt || p.joinedAt).toLocaleTimeString('en-IN', {
+                        timeZone: 'Asia/Kolkata',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        hour12: true
+                    });
+                    summary += `• **${p.username}** - ${mins}m ${secs}s (${percentage}%) - Joined at ${joinTime}\n`;
+                });
+                summary += `\n`;
+            }
+            
+            // Statistics
+            const avgSeconds = sortedParticipants.reduce((sum, [_, p]) => sum + p.totalSeconds, 0) / sortedParticipants.length;
+            const avgMins = Math.floor(avgSeconds / 60);
+            const avgSecs = Math.floor(avgSeconds % 60);
+            const fullAttendance = sortedParticipants.filter(([_, p]) => p.totalSeconds >= (totalDuration / 1000) * 0.95).length;
+            
+            summary += `📈 **Statistics:**\n`;
+            summary += `• Total participants: ${sortedParticipants.length} members\n`;
+            summary += `• Average attendance: ${avgMins}m ${avgSecs}s per member\n`;
+            summary += `• Full attendance (95%+): ${fullAttendance} members\n`;
+        }
+        
+        await summaryChannel.send(summary);
+        console.log(`📊 Attendance summary posted for: ${meeting.topic}`);
+        
+    } catch (error) {
+        console.error('Error generating attendance summary:', error);
+    }
+}
+
 // Helper function to format date for daily update
 function formatISTDate(date) {
     return date.toLocaleString('en-US', {
@@ -357,6 +574,27 @@ client.once(Events.ClientReady, async (c) => {
     
     console.log('Personal reminder checker started - runs every minute');
     
+    // Schedule automated meeting tracking checker (runs every minute)
+    cron.schedule('* * * * *', async () => {
+        const now = Date.now();
+        
+        for (const [meetingId, meeting] of scheduledMeetings.entries()) {
+            // Check if it's time to START tracking
+            if (meeting.status === 'scheduled' && meeting.startTime.getTime() <= now) {
+                await startAutomatedTracking(meeting, meetingId);
+            }
+            
+            // Check if it's time to END tracking
+            if (meeting.status === 'active' && meeting.endTime.getTime() <= now) {
+                await endAutomatedTracking(meetingId);
+            }
+        }
+    }, {
+        timezone: 'Asia/Kolkata'
+    });
+    
+    console.log('Automated meeting tracking started - checks every minute');
+    
     // Post Meeting Manager interface in schedule meet channel
     try {
         const scheduleChannel = await client.channels.fetch(SCHEDULE_MEET_CHANNEL_ID);
@@ -379,13 +617,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
                     .setCustomId('schedule_modal')
                     .setTitle('📅 Schedule a Meeting');
 
-                const timeInput = new TextInputBuilder()
-                    .setCustomId('meeting_time')
-                    .setLabel('Meeting Time (e.g., 8:00 PM)')
-                    .setStyle(TextInputStyle.Short)
-                    .setPlaceholder('8:00 PM')
-                    .setRequired(true);
-
                 const topicInput = new TextInputBuilder()
                     .setCustomId('meeting_topic')
                     .setLabel('Meeting Topic')
@@ -393,10 +624,42 @@ client.on(Events.InteractionCreate, async (interaction) => {
                     .setPlaceholder('Daily Standup')
                     .setRequired(true);
 
-                const firstRow = new ActionRowBuilder().addComponents(timeInput);
-                const secondRow = new ActionRowBuilder().addComponents(topicInput);
+                const channelInput = new TextInputBuilder()
+                    .setCustomId('meeting_channel')
+                    .setLabel('Voice Channel (Lounge/Aura/Room1/Room2)')
+                    .setStyle(TextInputStyle.Short)
+                    .setPlaceholder('Lounge')
+                    .setRequired(true);
 
-                modal.addComponents(firstRow, secondRow);
+                const dateInput = new TextInputBuilder()
+                    .setCustomId('meeting_date')
+                    .setLabel('Date (DD/MM/YYYY) - Leave blank for today')
+                    .setStyle(TextInputStyle.Short)
+                    .setPlaceholder('30/11/2025')
+                    .setRequired(false);
+
+                const startTimeInput = new TextInputBuilder()
+                    .setCustomId('meeting_start_time')
+                    .setLabel('Start Time (e.g., 8:00 PM)')
+                    .setStyle(TextInputStyle.Short)
+                    .setPlaceholder('8:00 PM')
+                    .setRequired(true);
+
+                const endTimeInput = new TextInputBuilder()
+                    .setCustomId('meeting_end_time')
+                    .setLabel('End Time (e.g., 10:00 PM)')
+                    .setStyle(TextInputStyle.Short)
+                    .setPlaceholder('10:00 PM')
+                    .setRequired(true);
+
+                modal.addComponents(
+                    new ActionRowBuilder().addComponents(topicInput),
+                    new ActionRowBuilder().addComponents(channelInput),
+                    new ActionRowBuilder().addComponents(dateInput),
+                    new ActionRowBuilder().addComponents(startTimeInput),
+                    new ActionRowBuilder().addComponents(endTimeInput)
+                );
+                
                 await interaction.showModal(modal);
                 return;
             }
@@ -414,7 +677,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
                 const buttons = [];
                 scheduledMeetings.forEach((meeting, id) => {
-                    const timeStr = meeting.time.toLocaleString('en-IN', {
+                    const startTimeStr = meeting.startTime.toLocaleString('en-IN', {
                         timeZone: 'Asia/Kolkata',
                         weekday: 'short',
                         month: 'short',
@@ -424,11 +687,22 @@ client.on(Events.InteractionCreate, async (interaction) => {
                         hour12: true
                     });
                     
+                    const endTimeStr = meeting.endTime.toLocaleTimeString('en-IN', {
+                        timeZone: 'Asia/Kolkata',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        hour12: true
+                    });
+                    
+                    const statusEmoji = meeting.status === 'active' ? '🔴 LIVE' : '📌';
                     const creatorTag = meeting.creatorId === interaction.user.id ? ' 👤' : '';
-                    message += `📌 **${meeting.topic}**${creatorTag}\n🕐 ${timeStr} IST\n\n`;
+                    
+                    message += `${statusEmoji} **${meeting.topic}**${creatorTag}\n`;
+                    message += `🎙️ ${meeting.channelName}\n`;
+                    message += `🕐 ${startTimeStr} - ${endTimeStr}\n\n`;
 
-                    // Only show cancel button if user is the creator
-                    if (meeting.creatorId === interaction.user.id) {
+                    // Only show cancel button if user is the creator and meeting hasn't started
+                    if (meeting.creatorId === interaction.user.id && meeting.status === 'scheduled') {
                         const label = meeting.topic.length > 15 ? meeting.topic.substring(0, 15) + '...' : meeting.topic;
                         buttons.push(
                             new ButtonBuilder()
@@ -530,109 +804,180 @@ client.on(Events.InteractionCreate, async (interaction) => {
         
         // Handle modal submissions
         if (interaction.isModalSubmit() && interaction.customId === 'schedule_modal') {
-            const timeStr = interaction.fields.getTextInputValue('meeting_time');
             const topic = interaction.fields.getTextInputValue('meeting_topic');
+            const channelName = interaction.fields.getTextInputValue('meeting_channel').trim().toLowerCase();
+            const dateStr = interaction.fields.getTextInputValue('meeting_date').trim();
+            const startTimeStr = interaction.fields.getTextInputValue('meeting_start_time');
+            const endTimeStr = interaction.fields.getTextInputValue('meeting_end_time');
 
             try {
-                // Parse time
-                const parts = timeStr.trim().split(' ');
-                if (parts.length < 2) {
+                // Find voice channel
+                const channel = VOICE_CHANNELS.find(ch => 
+                    ch.name.toLowerCase().includes(channelName) || 
+                    channelName.includes(ch.name.toLowerCase().split(' ')[0])
+                );
+                
+                if (!channel) {
                     return interaction.reply({
-                        content: '❌ Invalid time format. Use format like: **8:00 PM**',
+                        content: `❌ Invalid channel. Available channels:\n${VOICE_CHANNELS.map(ch => `• ${ch.name}`).join('\n')}`,
                         flags: MessageFlags.Ephemeral
                     });
                 }
-                
-                const [timeOnly, period] = parts;
-                const [hoursStr, minutesStr] = timeOnly.split(':');
-                let hours = parseInt(hoursStr);
-                const minutes = parseInt(minutesStr);
-                
-                if (isNaN(hours) || isNaN(minutes) || hours < 1 || hours > 12 || minutes < 0 || minutes > 59) {
-                    return interaction.reply({
-                        content: '❌ Invalid time format. Use format like: **8:00 PM**',
-                        flags: MessageFlags.Ephemeral
-                    });
-                }
-                
-                if (period.toUpperCase() === 'PM' && hours !== 12) hours += 12;
-                if (period.toUpperCase() === 'AM' && hours === 12) hours = 0;
-                
-                // Create scheduled time for today in IST
+
+                // Parse date (use today if not provided)
                 const now = new Date();
-                const istNow = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+                let targetDate;
                 
-                // Get current IST date components
-                const istDateStr = now.toLocaleString('en-US', { 
-                    timeZone: 'Asia/Kolkata',
-                    year: 'numeric',
-                    month: '2-digit',
-                    day: '2-digit'
-                });
-                const [month, day, year] = istDateStr.split('/');
-                
-                // Create date in IST with user's specified time
-                const scheduledTime = new Date(`${year}-${month}-${day}T${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:00+05:30`);
-                
-                // If time already passed today, schedule for tomorrow
-                if (scheduledTime <= now) {
-                    scheduledTime.setDate(scheduledTime.getDate() + 1);
+                if (dateStr) {
+                    const [day, month, year] = dateStr.split('/').map(Number);
+                    if (!day || !month || !year || day < 1 || day > 31 || month < 1 || month > 12) {
+                        return interaction.reply({
+                            content: '❌ Invalid date format. Use: **DD/MM/YYYY**',
+                            flags: MessageFlags.Ephemeral
+                        });
+                    }
+                    targetDate = { day, month, year };
+                } else {
+                    const istDateStr = now.toLocaleString('en-US', { 
+                        timeZone: 'Asia/Kolkata',
+                        year: 'numeric',
+                        month: '2-digit',
+                        day: '2-digit'
+                    });
+                    const [m, d, y] = istDateStr.split('/');
+                    targetDate = { day: parseInt(d), month: parseInt(m), year: parseInt(y) };
                 }
                 
-                // Store meeting with creator ID
+                // Parse start time
+                const startParts = startTimeStr.trim().split(' ');
+                if (startParts.length < 2) {
+                    return interaction.reply({
+                        content: '❌ Invalid start time format. Use: **8:00 PM**',
+                        flags: MessageFlags.Ephemeral
+                    });
+                }
+                
+                const [startTimeOnly, startPeriod] = startParts;
+                const [startHoursStr, startMinutesStr] = startTimeOnly.split(':');
+                let startHours = parseInt(startHoursStr);
+                const startMinutes = parseInt(startMinutesStr);
+                
+                if (isNaN(startHours) || isNaN(startMinutes) || startHours < 1 || startHours > 12 || startMinutes < 0 || startMinutes > 59) {
+                    return interaction.reply({
+                        content: '❌ Invalid start time format. Use: **8:00 PM**',
+                        flags: MessageFlags.Ephemeral
+                    });
+                }
+                
+                if (startPeriod.toUpperCase() === 'PM' && startHours !== 12) startHours += 12;
+                if (startPeriod.toUpperCase() === 'AM' && startHours === 12) startHours = 0;
+                
+                // Parse end time
+                const endParts = endTimeStr.trim().split(' ');
+                if (endParts.length < 2) {
+                    return interaction.reply({
+                        content: '❌ Invalid end time format. Use: **10:00 PM**',
+                        flags: MessageFlags.Ephemeral
+                    });
+                }
+                
+                const [endTimeOnly, endPeriod] = endParts;
+                const [endHoursStr, endMinutesStr] = endTimeOnly.split(':');
+                let endHours = parseInt(endHoursStr);
+                const endMinutes = parseInt(endMinutesStr);
+                
+                if (isNaN(endHours) || isNaN(endMinutes) || endHours < 1 || endHours > 12 || endMinutes < 0 || endMinutes > 59) {
+                    return interaction.reply({
+                        content: '❌ Invalid end time format. Use: **10:00 PM**',
+                        flags: MessageFlags.Ephemeral
+                    });
+                }
+                
+                if (endPeriod.toUpperCase() === 'PM' && endHours !== 12) endHours += 12;
+                if (endPeriod.toUpperCase() === 'AM' && endHours === 12) endHours = 0;
+                
+                // Create start and end time Date objects in IST
+                const startTime = new Date(`${targetDate.year}-${targetDate.month.toString().padStart(2, '0')}-${targetDate.day.toString().padStart(2, '0')}T${startHours.toString().padStart(2, '0')}:${startMinutes.toString().padStart(2, '0')}:00+05:30`);
+                const endTime = new Date(`${targetDate.year}-${targetDate.month.toString().padStart(2, '0')}-${targetDate.day.toString().padStart(2, '0')}T${endHours.toString().padStart(2, '0')}:${endMinutes.toString().padStart(2, '0')}:00+05:30`);
+                
+                // Validate times
+                if (startTime <= now) {
+                    return interaction.reply({
+                        content: '❌ Start time must be in the future.',
+                        flags: MessageFlags.Ephemeral
+                    });
+                }
+                
+                if (endTime <= startTime) {
+                    return interaction.reply({
+                        content: '❌ End time must be after start time.',
+                        flags: MessageFlags.Ephemeral
+                    });
+                }
+                
                 const meetingId = Date.now().toString();
-                const delay = scheduledTime.getTime() - now.getTime();
                 
-                const timeoutId = setTimeout(async () => {
-                    await sendMeetingReminder(topic, meetingId);
-                    scheduledMeetings.delete(meetingId);
-                }, delay);
-                
-                const dateStr = scheduledTime.toLocaleDateString('en-IN', {
+                const dateDispStr = startTime.toLocaleDateString('en-IN', {
                     timeZone: 'Asia/Kolkata',
                     weekday: 'long',
                     year: 'numeric',
                     month: 'long',
                     day: 'numeric'
                 });
-                const timeDispStr = scheduledTime.toLocaleTimeString('en-IN', {
+                const startTimeDispStr = startTime.toLocaleTimeString('en-IN', {
+                    timeZone: 'Asia/Kolkata',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    hour12: true
+                });
+                const endTimeDispStr = endTime.toLocaleTimeString('en-IN', {
                     timeZone: 'Asia/Kolkata',
                     hour: '2-digit',
                     minute: '2-digit',
                     hour12: true
                 });
                 
-                // Send confirmation in schedule channel (visible to all)
+                // Calculate duration
+                const durationMs = endTime.getTime() - startTime.getTime();
+                const durationHours = Math.floor(durationMs / (1000 * 60 * 60));
+                const durationMinutes = Math.floor((durationMs % (1000 * 60 * 60)) / (1000 * 60));
+                const durationStr = `${durationHours}h ${durationMinutes}m`;
+                
+                // Send confirmation in schedule channel
                 const scheduleChannel = await client.channels.fetch(SCHEDULE_MEET_CHANNEL_ID);
                 const confirmationMsg = await scheduleChannel.send({
                     content: `✅ **Meeting Scheduled**\n` +
                             `👤 By: <@${interaction.user.id}>\n` +
-                            `📅 ${dateStr}\n` +
-                            `🕐 ${timeDispStr} IST\n` +
+                            `📅 ${dateDispStr}\n` +
+                            `🕐 ${startTimeDispStr} - ${endTimeDispStr} IST (${durationStr})\n` +
                             `📝 **${topic}**\n` +
-                            `📍 Lounge voice channel\n\n` +
-                            `⏰ Reminder will be posted at meeting time.`
+                            `📍 ${channel.name}\n\n` +
+                            `⏰ Tracking will start automatically at meeting time.`
                 });
                 
                 scheduledMeetings.set(meetingId, {
-                    time: scheduledTime,
+                    startTime: startTime,
+                    endTime: endTime,
                     topic: topic,
-                    channelId: LOUNGE_VOICE_CHANNEL_ID,
-                    timeoutId: timeoutId,
+                    channelId: channel.id,
+                    channelName: channel.name,
                     creatorId: interaction.user.id,
-                    confirmationMsg: confirmationMsg
+                    confirmationMsg: confirmationMsg,
+                    status: 'scheduled'
                 });
                 
-                // Reply to user (only they see this)
+                // Reply to user
                 await interaction.reply({
-                    content: `✅ **Your meeting has been scheduled successfully!**\n` +
-                            `📝 Topic: ${topic}\n` +
-                            `🕐 Time: ${timeDispStr} IST\n\n` +
-                            `The confirmation is visible to everyone in <#${SCHEDULE_MEET_CHANNEL_ID}>`,
+                    content: `✅ **Meeting scheduled successfully!**\n` +
+                            `📝 ${topic}\n` +
+                            `🎙️ ${channel.name}\n` +
+                            `🕐 ${startTimeDispStr} - ${endTimeDispStr} IST\n` +
+                            `⏱️ Duration: ${durationStr}\n\n` +
+                            `Attendance tracking will start automatically.`,
                     flags: MessageFlags.Ephemeral
                 });
                 
-                console.log(`📅 Meeting scheduled by ${interaction.user.username}: ${topic} at ${timeDispStr}`);
+                console.log(`📅 Meeting scheduled by ${interaction.user.username}: ${topic} at ${startTimeDispStr}`);
                 
             } catch (error) {
                 console.error('Error scheduling meeting:', error);
@@ -1035,6 +1380,9 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
         const oldChannel = oldState.channel;
         const newChannel = newState.channel;
         
+        // Check for active scheduled meetings first
+        await handleScheduledMeetingTracking(userId, oldState, newState);
+        
         // User joined a voice channel
         if (!oldChannel && newChannel) {
             await handleVoiceJoin(userId, newChannel);
@@ -1052,6 +1400,58 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
         console.error('Error handling voice state update:', error);
     }
 });
+
+// Handle tracking for scheduled meetings
+async function handleScheduledMeetingTracking(userId, oldState, newState) {
+    const now = Date.now();
+    const user = await client.users.fetch(userId).catch(() => null);
+    if (!user || user.bot) return; // Ignore bots
+    
+    const username = user.username;
+    
+    for (const [meetingId, meeting] of activeMeetings.entries()) {
+        const oldChannelId = oldState.channelId;
+        const newChannelId = newState.channelId;
+        const meetingChannelId = meeting.channelId;
+        
+        // User JOINED the monitored meeting channel
+        if (newChannelId === meetingChannelId && oldChannelId !== meetingChannelId) {
+            if (!meeting.participants.has(userId)) {
+                meeting.participants.set(userId, {
+                    username: username,
+                    joinedAt: now,
+                    leftAt: null,
+                    totalSeconds: 0,
+                    sessions: []
+                });
+            } else {
+                // Re-joining after disconnect
+                const participant = meeting.participants.get(userId);
+                participant.joinedAt = now;
+                participant.leftAt = null;
+            }
+            console.log(`➕ ${username} joined ${meeting.topic} (scheduled meeting)`);
+        }
+        
+        // User LEFT the monitored meeting channel
+        if (oldChannelId === meetingChannelId && newChannelId !== meetingChannelId) {
+            const participant = meeting.participants.get(userId);
+            if (participant && !participant.leftAt) {
+                const sessionDuration = Math.floor((now - participant.joinedAt) / 1000);
+                participant.totalSeconds += sessionDuration;
+                participant.leftAt = now;
+                participant.sessions.push({
+                    joinedAt: participant.joinedAt,
+                    leftAt: now,
+                    duration: sessionDuration
+                });
+                
+                const minutes = Math.floor(sessionDuration / 60);
+                console.log(`➖ ${username} left ${meeting.topic} (session: ${minutes}m ${sessionDuration % 60}s)`);
+            }
+        }
+    }
+}
 
 async function handleVoiceJoin(userId, channel) {
     const channelId = channel.id;
