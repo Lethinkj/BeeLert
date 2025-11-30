@@ -28,16 +28,19 @@ const CHANNEL_ID = process.env.CHANNEL_ID;
 const GEMINI_CHANNEL_ID = process.env.GEMINI_CHANNEL_ID;
 const STUDY_CHANNEL_ID = process.env.STUDY_CHANNEL_ID;
 const LOUNGE_VOICE_CHANNEL_ID = process.env.LOUNGE_VOICE_CHANNEL_ID || '1350324320672546826';
+const AURA_VOICE_CHANNEL_ID = process.env.AURA_VOICE_CHANNEL_ID || '1350324320672546827';
+const MEETING_ROOM1_CHANNEL_ID = process.env.MEETING_ROOM1_CHANNEL_ID || '1350324320672546828';
+const MEETING_ROOM2_CHANNEL_ID = process.env.MEETING_ROOM2_CHANNEL_ID || '1367146219633119354';
 const MEETING_SUMMARY_CHANNEL_ID = process.env.MEETING_SUMMARY_CHANNEL_ID || '1442861248285773924';
 const SCHEDULE_MEET_CHANNEL_ID = process.env.SCHEDULE_MEET_CHANNEL_ID || '1443135153185493033';
 const ROLE_NAME = process.env.ROLE_NAME || 'Basher';
 
 // Available voice channels for scheduled meetings
 const VOICE_CHANNELS = [
-    { id: '1350324320672546826', name: 'Lounge' },
-    { id: '1350324320672546827', name: 'Aura-7f Space' },
-    { id: '1350324320672546828', name: 'Meeting Room 1' },
-    { id: '1367146219633119354', name: 'Meeting Room 2' }
+    { id: LOUNGE_VOICE_CHANNEL_ID, name: 'Lounge' },
+    { id: AURA_VOICE_CHANNEL_ID, name: 'Aura-7f Space' },
+    { id: MEETING_ROOM1_CHANNEL_ID, name: 'Meeting Room 1' },
+    { id: MEETING_ROOM2_CHANNEL_ID, name: 'Meeting Room 2' }
 ];
 
 // Clan member IDs
