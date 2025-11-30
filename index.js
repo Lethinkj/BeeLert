@@ -238,9 +238,7 @@ async function sendMeetingReminder(topic, meetingId) {
         const loungeChannel = await client.channels.fetch(LOUNGE_VOICE_CHANNEL_ID);
         const channelLink = `https://discord.com/channels/${channel.guildId}/${LOUNGE_VOICE_CHANNEL_ID}`;
         
-        const reminderMessage = `${role ? `<@&${role.id}>` : `@${ROLE_NAME}`}
-
-📢 **MEETING IS NOW LIVE!**
+        const reminderMessage = `📢 **MEETING IS NOW LIVE!**
 
 📝 **Topic:** ${topic}
 🎙️ **Location:** ${loungeChannel.name}
@@ -305,10 +303,8 @@ async function startAutomatedTracking(meeting, meetingId) {
         
         // Notify in general channel
         const generalChannel = await client.channels.fetch(CHANNEL_ID);
-        const role = generalChannel.guild.roles.cache.find(r => r.name === ROLE_NAME);
         
         await generalChannel.send(
-            `${role ? `<@&${role.id}>` : `@${ROLE_NAME}`}\n\n` +
             `🎬 **Meeting Started - Attendance Tracking Active**\n\n` +
             `📝 ${meeting.topic}\n` +
             `🎙️ ${meeting.channelName}\n` +
