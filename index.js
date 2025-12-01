@@ -73,7 +73,7 @@ const MINIMUM_MEETING_DURATION = 10 * 60 * 1000; // 10 minutes in milliseconds
 
 // Scheduled meetings tracking
 const scheduledMeetings = new Map(); // meetingId -> { time, topic, channelId, timeoutId, creatorId, confirmationMsg, startTime, endTime, date, status }
-const activeMeetings = new Map(); // meetingId -> { actualStartTime, participants: Map(userId -> {username, joinedAt, leftAt, totalSeconds}), twoMinCheckDone: false }
+const activeMeetings = new Map(); // meetingId -> { actualStartTime, participants: Map(userId -> {username, joinedAt, leftAt, totalSeconds}), scheduledSummaryPosted: false, waitingForEmpty: false }
 
 // Personal reminder tracking (Note: Data is lost on restart due to Render's ephemeral filesystem)
 const userReminders = new Map(); // userId -> { time: '20:00', customMessage: null, active: true }
@@ -262,8 +262,8 @@ async function startAutomatedTracking(meeting, meetingId) {
             ...meeting,
             actualStartTime: startTime,
             participants: participants,
-            twoMinCheckDone: false,
-            trackingMode: 'scheduled' // Will change to 'continuous' after 2 min if people present
+            scheduledSummaryPosted: false,
+            waitingForEmpty: false
         });
         
         meeting.status = 'active';
@@ -286,163 +286,189 @@ async function startAutomatedTracking(meeting, meetingId) {
     }
 }
 
-// End automated meeting tracking
-async function endAutomatedTracking(meetingId) {
+// Generate scheduled period summary (first summary at scheduled end time)
+async function generateScheduledPeriodSummary(meeting, meetingId, scheduledEndTime) {
     try {
-        const meeting = activeMeetings.get(meetingId);
-        if (!meeting) return;
+        const summaryChannel = await client.channels.fetch(MEETING_SUMMARY_CHANNEL_ID);
         
-        const endTime = Date.now();
-        const channel = await client.channels.fetch(meeting.channelId);
+        // Calculate times up to scheduled end for participants
+        const scheduledDuration = scheduledEndTime.getTime() - meeting.actualStartTime;
+        const durationMinutes = Math.floor(scheduledDuration / (1000 * 60));
+        const durationHours = Math.floor(durationMinutes / 60);
+        const durationRemainingMins = durationMinutes % 60;
         
-        // Calculate final times for members still in channel
-        const stillPresent = channel.members;
+        // Create snapshot of attendance during scheduled period
+        const attendanceSnapshot = [];
         meeting.participants.forEach((participant, userId) => {
-            const isStillInChannel = stillPresent.has(userId);
+            let timeInScheduledPeriod = 0;
             
-            if (!participant.leftAt && isStillInChannel) {
-                // Member is still in channel - calculate their final time
-                const sessionDuration = Math.floor((endTime - participant.joinedAt) / 1000);
-                participant.totalSeconds += sessionDuration;
-                participant.leftAt = endTime;
-                participant.sessions.push({
-                    joinedAt: participant.joinedAt,
-                    leftAt: endTime,
-                    duration: sessionDuration
+            // Calculate time spent during scheduled period
+            participant.sessions.forEach(session => {
+                const sessionStart = session.joinedAt;
+                const sessionEnd = session.leftAt || Date.now();
+                
+                // Clip session to scheduled period
+                const effectiveStart = Math.max(sessionStart, meeting.actualStartTime);
+                const effectiveEnd = Math.min(sessionEnd, scheduledEndTime.getTime());
+                
+                if (effectiveEnd > effectiveStart) {
+                    timeInScheduledPeriod += Math.floor((effectiveEnd - effectiveStart) / 1000);
+                }
+            });
+            
+            // Add current session if still in channel
+            if (!participant.leftAt) {
+                const effectiveStart = Math.max(participant.joinedAt, meeting.actualStartTime);
+                const effectiveEnd = scheduledEndTime.getTime();
+                if (effectiveEnd > effectiveStart) {
+                    timeInScheduledPeriod += Math.floor((effectiveEnd - effectiveStart) / 1000);
+                }
+            }
+            
+            if (timeInScheduledPeriod > 0) {
+                attendanceSnapshot.push({
+                    username: participant.username,
+                    seconds: timeInScheduledPeriod
                 });
             }
         });
         
-        // Generate and post summary
-        await generateAttendanceSummary(meeting, meetingId);
+        attendanceSnapshot.sort((a, b) => b.seconds - a.seconds);
         
-        // Cleanup
-        activeMeetings.delete(meetingId);
-        meeting.status = 'completed';
+        let summary = `📊 **Meeting Summary - Scheduled Period**\n\n`;
+        summary += `📝 **${meeting.topic}**\n`;
+        summary += `🎙️ Channel: ${meeting.channelName}\n`;
+        summary += `📅 ${new Date(meeting.actualStartTime).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}\n`;
+        summary += `🕐 Scheduled: ${new Date(meeting.actualStartTime).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true })} - ${scheduledEndTime.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true })} IST (${durationHours}h ${durationRemainingMins}m)\n\n`;
+        summary += `👥 **Attendance During Scheduled Time:**\n\n`;
+        
+        if (attendanceSnapshot.length === 0) {
+            summary += `❌ No participants attended.\n`;
+        } else {
+            attendanceSnapshot.forEach(p => {
+                const mins = Math.floor(p.seconds / 60);
+                const secs = p.seconds % 60;
+                const percentage = Math.round((p.seconds / (scheduledDuration / 1000)) * 100);
+                const badge = percentage >= 95 ? ' ⭐' : '';
+                summary += `• **${p.username}** - ${mins}m ${secs}s (${percentage}%)${badge}\n`;
+            });
+            
+            const avgSeconds = attendanceSnapshot.reduce((sum, p) => sum + p.seconds, 0) / attendanceSnapshot.length;
+            const avgMins = Math.floor(avgSeconds / 60);
+            summary += `\n📈 Average attendance: ${avgMins}m per member\n`;
+        }
+        
+        await summaryChannel.send(summary);
+        console.log(`📊 Scheduled period summary posted for: ${meeting.topic}`);
+    } catch (error) {
+        console.error('Error generating scheduled period summary:', error);
+    }
+}
+
+// Generate final summary (second summary when everyone leaves)
+async function generateFinalSummary(meeting, meetingId) {
+    try {
+        const summaryChannel = await client.channels.fetch(MEETING_SUMMARY_CHANNEL_ID);
+        const scheduledMeeting = scheduledMeetings.get(meetingId);
+        
+        const actualEndTime = Date.now();
+        const totalDuration = actualEndTime - meeting.actualStartTime;
+        const totalMinutes = Math.floor(totalDuration / (1000 * 60));
+        const totalHours = Math.floor(totalMinutes / 60);
+        const remainingMinutes = totalMinutes % 60;
+        
+        // Calculate final times for all participants
+        const finalAttendance = [];
+        meeting.participants.forEach((participant, userId) => {
+            let totalSeconds = participant.totalSeconds;
+            
+            // Add current session if still tracking
+            if (!participant.leftAt) {
+                totalSeconds += Math.floor((actualEndTime - participant.joinedAt) / 1000);
+            }
+            
+            if (totalSeconds > 0) {
+                finalAttendance.push({
+                    username: participant.username,
+                    seconds: totalSeconds,
+                    joinedAt: participant.sessions[0]?.joinedAt || participant.joinedAt
+                });
+            }
+        });
+        
+        finalAttendance.sort((a, b) => b.seconds - a.seconds);
+        
+        let summary = `📊 **Final Meeting Report - Complete Attendance**\n\n`;
+        summary += `📝 **${meeting.topic}**\n`;
+        summary += `🎙️ Channel: ${meeting.channelName}\n`;
+        summary += `📅 ${new Date(meeting.actualStartTime).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}\n`;
+        summary += `🕐 Actual: ${new Date(meeting.actualStartTime).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true })} - ${new Date(actualEndTime).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true })} IST (${totalHours}h ${remainingMinutes}m)\n\n`;
+        
+        if (scheduledMeeting) {
+            const scheduledDuration = scheduledMeeting.endTime.getTime() - scheduledMeeting.startTime.getTime();
+            const overtimeMs = totalDuration - scheduledDuration;
+            if (overtimeMs > 0) {
+                const overtimeMins = Math.floor(overtimeMs / (1000 * 60));
+                summary += `⏱️ Overtime: ${overtimeMins} minutes beyond scheduled end\n\n`;
+            }
+        }
+        
+        summary += `👥 **Complete Attendance:**\n\n`;
+        
+        if (finalAttendance.length === 0) {
+            summary += `❌ No participants.\n`;
+        } else {
+            finalAttendance.forEach(p => {
+                const mins = Math.floor(p.seconds / 60);
+                const secs = p.seconds % 60;
+                const percentage = Math.round((p.seconds / (totalDuration / 1000)) * 100);
+                const badge = percentage >= 95 ? ' ⭐' : '';
+                summary += `• **${p.username}** - ${mins}m ${secs}s (${percentage}%)${badge}\n`;
+            });
+            
+            const avgSeconds = finalAttendance.reduce((sum, p) => sum + p.seconds, 0) / finalAttendance.length;
+            const avgMins = Math.floor(avgSeconds / 60);
+            const fullAttendance = finalAttendance.filter(p => p.seconds >= (totalDuration / 1000) * 0.95).length;
+            
+            summary += `\n📈 **Statistics:**\n`;
+            summary += `• Total participants: ${finalAttendance.length}\n`;
+            summary += `• Average attendance: ${avgMins}m per member\n`;
+            summary += `• Full attendance (95%+): ${fullAttendance} members\n`;
+        }
+        
+        await summaryChannel.send(summary);
+        console.log(`📊 Final summary posted for: ${meeting.topic}`);
+    } catch (error) {
+        console.error('Error generating final summary:', error);
+    }
+}
+
+// Cleanup meeting data
+async function finalizeAndCleanup(meetingId) {
+    const meeting = activeMeetings.get(meetingId);
+    if (!meeting) return;
+    
+    // Cleanup
+    activeMeetings.delete(meetingId);
+    const scheduledMeeting = scheduledMeetings.get(meetingId);
+    if (scheduledMeeting) {
+        scheduledMeeting.status = 'completed';
         
         // Delete confirmation message
-        if (meeting.confirmationMsg) {
+        if (scheduledMeeting.confirmationMsg) {
             try {
-                await meeting.confirmationMsg.delete();
+                await scheduledMeeting.confirmationMsg.delete();
                 console.log(`🗑️ Deleted confirmation message for: ${meeting.topic}`);
             } catch (err) {
                 console.error('Error deleting confirmation message:', err);
             }
         }
-        
-        console.log(`✅ Meeting ended and summary posted: ${meeting.topic}`);
-        
-    } catch (error) {
-        console.error('Error ending automated tracking:', error);
     }
+    
+    console.log(`✅ Meeting fully completed: ${meeting.topic}`);
 }
 
 // Generate attendance summary for scheduled meeting
-async function generateAttendanceSummary(meeting, meetingId) {
-    try {
-        const summaryChannel = await client.channels.fetch(MEETING_SUMMARY_CHANNEL_ID);
-        
-        const totalDuration = meeting.endTime.getTime() - meeting.actualStartTime;
-        const totalMinutes = Math.floor(totalDuration / (1000 * 60));
-        const totalHours = Math.floor(totalMinutes / 60);
-        const remainingMinutes = totalMinutes % 60;
-        
-        // Sort participants by total time (descending)
-        const sortedParticipants = Array.from(meeting.participants.entries())
-            .sort((a, b) => b[1].totalSeconds - a[1].totalSeconds);
-        
-        // Separate into "present from start" and "joined later"
-        const presentFromStart = [];
-        const joinedLater = [];
-        
-        sortedParticipants.forEach(([userId, participant]) => {
-            const timeDiff = participant.sessions[0]?.joinedAt - meeting.actualStartTime || 0;
-            if (timeDiff < 60000) { // Within 1 minute of start = "from start"
-                presentFromStart.push({ userId, ...participant });
-            } else {
-                joinedLater.push({ userId, ...participant });
-            }
-        });
-        
-        // Build summary message
-        let summary = `📊 **Automated Meeting Report**\n\n`;
-        summary += `📝 **${meeting.topic}**\n`;
-        summary += `🎙️ Channel: ${meeting.channelName}\n`;
-        summary += `📅 ${new Date(meeting.actualStartTime).toLocaleDateString('en-IN', { 
-            timeZone: 'Asia/Kolkata',
-            weekday: 'long',
-            month: 'long',
-            day: 'numeric',
-            year: 'numeric'
-        })}\n`;
-        summary += `🕐 ${new Date(meeting.actualStartTime).toLocaleTimeString('en-IN', {
-            timeZone: 'Asia/Kolkata',
-            hour: '2-digit',
-            minute: '2-digit',
-            hour12: true
-        })} - ${new Date(meeting.endTime).toLocaleTimeString('en-IN', {
-            timeZone: 'Asia/Kolkata',
-            hour: '2-digit',
-            minute: '2-digit',
-            hour12: true
-        })} IST`;
-        summary += ` (${totalHours}h ${remainingMinutes}m)\n\n`;
-        summary += `👥 **Attendance Summary:**\n\n`;
-        
-        if (sortedParticipants.length === 0) {
-            summary += `❌ No participants joined this meeting.\n`;
-        } else {
-            // Present from start
-            if (presentFromStart.length > 0) {
-                summary += `✅ **Present from start (${presentFromStart.length} members):**\n`;
-                presentFromStart.forEach(p => {
-                    const mins = Math.floor(p.totalSeconds / 60);
-                    const secs = p.totalSeconds % 60;
-                    const percentage = Math.round((p.totalSeconds / (totalDuration / 1000)) * 100);
-                    const badge = percentage >= 95 ? ' ⭐' : '';
-                    summary += `• **${p.username}** - ${mins}m ${secs}s (${percentage}%)${badge}\n`;
-                });
-                summary += `\n`;
-            }
-            
-            // Joined later
-            if (joinedLater.length > 0) {
-                summary += `⏰ **Joined after start (${joinedLater.length} members):**\n`;
-                joinedLater.forEach(p => {
-                    const mins = Math.floor(p.totalSeconds / 60);
-                    const secs = p.totalSeconds % 60;
-                    const percentage = Math.round((p.totalSeconds / (totalDuration / 1000)) * 100);
-                    const joinTime = new Date(p.sessions[0]?.joinedAt || p.joinedAt).toLocaleTimeString('en-IN', {
-                        timeZone: 'Asia/Kolkata',
-                        hour: '2-digit',
-                        minute: '2-digit',
-                        hour12: true
-                    });
-                    summary += `• **${p.username}** - ${mins}m ${secs}s (${percentage}%) - Joined at ${joinTime}\n`;
-                });
-                summary += `\n`;
-            }
-            
-            // Statistics
-            const avgSeconds = sortedParticipants.reduce((sum, [_, p]) => sum + p.totalSeconds, 0) / sortedParticipants.length;
-            const avgMins = Math.floor(avgSeconds / 60);
-            const avgSecs = Math.floor(avgSeconds % 60);
-            const fullAttendance = sortedParticipants.filter(([_, p]) => p.totalSeconds >= (totalDuration / 1000) * 0.95).length;
-            
-            summary += `📈 **Statistics:**\n`;
-            summary += `• Total participants: ${sortedParticipants.length} members\n`;
-            summary += `• Average attendance: ${avgMins}m ${avgSecs}s per member\n`;
-            summary += `• Full attendance (95%+): ${fullAttendance} members\n`;
-        }
-        
-        await summaryChannel.send(summary);
-        console.log(`📊 Attendance summary posted for: ${meeting.topic}`);
-        
-    } catch (error) {
-        console.error('Error generating attendance summary:', error);
-    }
-}
-
 // Helper function to format date for daily update
 function formatISTDate(date) {
     return date.toLocaleString('en-US', {
@@ -551,46 +577,47 @@ client.once(Events.ClientReady, async (c) => {
             }
         }
         
-        // Check active meetings for 2-minute check and empty channel detection
+        // Check active meetings for scheduled end time and empty channel
         for (const [meetingId, activeMeeting] of activeMeetings.entries()) {
-            const timeSinceStart = now - activeMeeting.actualStartTime;
-            const twoMinutes = 2 * 60 * 1000;
-            
-            // 2-minute check: Are there participants?
-            if (!activeMeeting.twoMinCheckDone && timeSinceStart >= twoMinutes) {
-                activeMeeting.twoMinCheckDone = true;
-                
-                const channel = await client.channels.fetch(activeMeeting.channelId);
-                const currentMembers = channel.members.filter(m => !m.user.bot);
-                
-                if (currentMembers.size > 0) {
-                    // People still present after 2 min - switch to continuous tracking
-                    activeMeeting.trackingMode = 'continuous';
-                    console.log(`✅ ${activeMeeting.topic}: ${currentMembers.size} members present after 2 min - continuing tracking until all leave`);
-                } else {
-                    // No one present after 2 min - end meeting
-                    console.log(`⚠️ ${activeMeeting.topic}: No participants after 2 min - ending meeting`);
-                    await endAutomatedTracking(meetingId);
-                }
-            }
-            
-            // Continuous tracking mode: Check if channel is empty
-            if (activeMeeting.trackingMode === 'continuous' && activeMeeting.twoMinCheckDone) {
-                const channel = await client.channels.fetch(activeMeeting.channelId);
-                const currentMembers = channel.members.filter(m => !m.user.bot);
-                
-                if (currentMembers.size === 0) {
-                    // Everyone has left - end meeting
-                    console.log(`✅ ${activeMeeting.topic}: All participants have left - ending meeting`);
-                    await endAutomatedTracking(meetingId);
-                }
-            }
-            
-            // Fallback: Still end at scheduled end time if somehow still running
             const scheduledMeeting = scheduledMeetings.get(meetingId);
-            if (scheduledMeeting && scheduledMeeting.endTime.getTime() <= now && activeMeeting.trackingMode === 'scheduled') {
-                console.log(`⏰ ${activeMeeting.topic}: Reached scheduled end time - forcing end`);
-                await endAutomatedTracking(meetingId);
+            if (!scheduledMeeting) continue;
+            
+            const channel = await client.channels.fetch(activeMeeting.channelId);
+            const currentMembers = channel.members.filter(m => !m.user.bot);
+            
+            // FIRST CHECK: Has scheduled end time been reached?
+            if (!activeMeeting.scheduledSummaryPosted && scheduledMeeting.endTime.getTime() <= now) {
+                // Post first summary for scheduled period
+                console.log(`⏰ ${activeMeeting.topic}: Scheduled time ended - posting scheduled period summary`);
+                await generateScheduledPeriodSummary(activeMeeting, meetingId, scheduledMeeting.endTime);
+                activeMeeting.scheduledSummaryPosted = true;
+                
+                // Check if anyone is still in the channel
+                if (currentMembers.size > 0) {
+                    activeMeeting.waitingForEmpty = true;
+                    console.log(`👥 ${activeMeeting.topic}: ${currentMembers.size} members still present - waiting for all to leave`);
+                    
+                    // Notify that we're waiting
+                    const generalChannel = await client.channels.fetch(CHANNEL_ID);
+                    await generalChannel.send(
+                        `⏱️ **Meeting Extended Beyond Scheduled Time**\n\n` +
+                        `📝 ${activeMeeting.topic}\n` +
+                        `🎙️ ${activeMeeting.channelName}\n` +
+                        `👥 ${currentMembers.size} members still present\n\n` +
+                        `Continuing to track until all participants leave...`
+                    );
+                } else {
+                    // No one left, end immediately
+                    console.log(`✅ ${activeMeeting.topic}: Channel empty at scheduled end - ending meeting`);
+                    await finalizeAndCleanup(meetingId);
+                }
+            }
+            
+            // SECOND CHECK: If waiting for empty channel, check if it's empty now
+            if (activeMeeting.waitingForEmpty && currentMembers.size === 0) {
+                console.log(`✅ ${activeMeeting.topic}: All participants have left - posting final summary`);
+                await generateFinalSummary(activeMeeting, meetingId);
+                await finalizeAndCleanup(meetingId);
             }
         }
     }, {
