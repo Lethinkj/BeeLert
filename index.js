@@ -1640,71 +1640,69 @@ async function endMeeting(channelId, channel) {
 
 async function generateMeetingSummary(meeting, totalDuration, channel, participants) {
     try {
-        const now = Date.now();
-        const actualEndTime = now;
+        const summaryChannel = await client.channels.fetch(MEETING_SUMMARY_CHANNEL_ID);
+        const actualEndTime = Date.now();
         const meetingDuration = actualEndTime - meeting.startTime;
         
-        const hours = Math.floor(meetingDuration / 1000 / 60 / 60);
-        const minutes = Math.floor((meetingDuration / 1000 / 60) % 60);
-        const durationStr = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+        const totalMinutes = Math.floor(meetingDuration / (1000 * 60));
+        const totalHours = Math.floor(totalMinutes / 60);
+        const remainingMinutes = totalMinutes % 60;
         
-        // Process participants: clip sessions, calculate attendance
-        const participantList = [];
-        const totalMeetingSeconds = meetingDuration / 1000;
-        
-        for (const [userId, participant] of meeting.participants) {
-            let totalSeconds = 0;
+        // Calculate final times for all participants
+        const finalAttendance = [];
+        meeting.participants.forEach((participant, userId) => {
+            let totalSeconds = participant.totalSeconds;
             
-            for (const session of participant.sessions) {
-                const sessionStart = session.joinedAt;
-                const sessionEnd = session.leftAt;
-                
-                const clippedStart = Math.max(sessionStart, meeting.startTime);
-                const clippedEnd = Math.min(sessionEnd, actualEndTime);
-                
-                if (clippedEnd > clippedStart) {
-                    totalSeconds += (clippedEnd - clippedStart) / 1000;
-                }
+            // Add current session if still tracking (shouldn't happen but safety check)
+            if (!participant.leftAt && participant.joinedAt) {
+                totalSeconds += Math.floor((actualEndTime - participant.joinedAt) / 1000);
             }
             
-            // Filter out users with less than 10 minutes
-            if (totalSeconds >= 10 * 60) {
-                participantList.push({
+            if (totalSeconds > 0) {
+                finalAttendance.push({
                     username: participant.username,
-                    totalSeconds: totalSeconds,
-                    percentage: Math.round((totalSeconds / totalMeetingSeconds) * 100)
+                    seconds: totalSeconds,
+                    joinedAt: participant.sessions[0]?.joinedAt || participant.joinedAt
                 });
             }
-        }
+        });
         
-        if (participantList.length === 0) {
+        // Filter out users with less than 10 minutes
+        const qualifiedAttendance = finalAttendance.filter(p => p.seconds >= 10 * 60);
+        
+        if (qualifiedAttendance.length === 0) {
             console.log('No qualified participants for Lounge meeting summary');
             return;
         }
         
-        // Sort by total time descending
-        participantList.sort((a, b) => b.totalSeconds - a.totalSeconds);
+        qualifiedAttendance.sort((a, b) => b.seconds - a.seconds);
         
-        let summaryText = '📊 **Meeting Summary - Lounge**\n\n';
-        summaryText += `⏱️ **Duration:** ${durationStr}\n\n`;
-        summaryText += '👥 **Attendance:**\n';
+        const totalMeetingSeconds = meetingDuration / 1000;
         
-        participantList.forEach((user, index) => {
-            const userHours = Math.floor(user.totalSeconds / 3600);
-            const userMinutes = Math.floor((user.totalSeconds % 3600) / 60);
-            const timeStr = userHours > 0 ? `${userHours}h ${userMinutes}m` : `${userMinutes}m`;
-            
-            // Award star for 95%+ attendance
-            const star = user.percentage >= 95 ? ' ⭐' : '';
-            
-            summaryText += `${index + 1}. ${user.username}: ${timeStr} (${user.percentage}%)${star}\n`;
+        let summary = `📊 **Meeting Summary - Lounge**\n\n`;
+        summary += `📅 ${new Date(meeting.startTime).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}\n`;
+        summary += `🕐 ${new Date(meeting.startTime).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true })} - ${new Date(actualEndTime).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true })} IST (${totalHours}h ${remainingMinutes}m)\n\n`;
+        summary += `👥 **Attendance:**\n\n`;
+        
+        qualifiedAttendance.forEach(p => {
+            const mins = Math.floor(p.seconds / 60);
+            const secs = p.seconds % 60;
+            const percentage = Math.round((p.seconds / totalMeetingSeconds) * 100);
+            const badge = percentage >= 95 ? ' ⭐' : '';
+            summary += `• **${p.username}** - ${mins}m ${secs}s (${percentage}%)${badge}\n`;
         });
         
-        const channelObj = await client.channels.fetch(UPDATES_CHANNEL_ID);
-        if (channelObj) {
-            await channelObj.send(summaryText);
-            console.log('✅ Lounge meeting summary posted to updates channel');
-        }
+        const avgSeconds = qualifiedAttendance.reduce((sum, p) => sum + p.seconds, 0) / qualifiedAttendance.length;
+        const avgMins = Math.floor(avgSeconds / 60);
+        const fullAttendance = qualifiedAttendance.filter(p => p.seconds >= totalMeetingSeconds * 0.95).length;
+        
+        summary += `\n📈 **Statistics:**\n`;
+        summary += `• Total participants: ${qualifiedAttendance.length}\n`;
+        summary += `• Average attendance: ${avgMins}m per member\n`;
+        summary += `• Full attendance (95%+): ${fullAttendance} members\n`;
+        
+        await summaryChannel.send(summary);
+        console.log(`📊 Lounge meeting summary posted`);
     } catch (error) {
         console.error('Error generating Lounge meeting summary:', error);
     }
