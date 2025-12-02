@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, Events, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, Partials, MessageFlags } = require('discord.js');
+const { Client, GatewayIntentBits, Events, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, Partials, MessageFlags, GuildScheduledEventEntityType, GuildScheduledEventPrivacyLevel } = require('discord.js');
 const cron = require('node-cron');
 const express = require('express');
 require('dotenv').config();
@@ -18,6 +18,7 @@ const client = new Client({
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.GuildVoiceStates,
         GatewayIntentBits.DirectMessages,
+        GatewayIntentBits.GuildScheduledEvents,
     ],
     partials: [Partials.Channel]
 });
@@ -268,17 +269,30 @@ async function startAutomatedTracking(meeting, meetingId) {
         
         meeting.status = 'active';
         
+        // Update Discord event status to ACTIVE
+        if (meeting.eventId) {
+            try {
+                const guild = channel.guild;
+                const event = await guild.scheduledEvents.fetch(meeting.eventId);
+                if (event && event.status === 1) { // 1 = SCHEDULED
+                    await event.setStatus(2); // 2 = ACTIVE
+                    console.log(`📶 Discord event updated to ACTIVE: ${meeting.topic}`);
+                }
+            } catch (err) {
+                console.error('Error updating Discord event status:', err);
+            }
+        }
+        
         console.log(`🎬 Started tracking: ${meeting.topic} in ${meeting.channelName} (${participants.size} already present)`);
         
-        // Notify in general channel
+        // Notify in general channel with channel link
         const generalChannel = await client.channels.fetch(CHANNEL_ID);
         
         await generalChannel.send(
-            `🎬 **Meeting Started - Attendance Tracking Active**\n\n` +
+            `🎬 **Meeting Started**\n\n` +
             `📝 ${meeting.topic}\n` +
-            `🎙️ ${meeting.channelName}\n` +
-            `👥 ${participants.size} members already present\n\n` +
-            `⏱️ All attendance is being tracked automatically.`
+            `🎙️ <#${meeting.channelId}>\n\n` +
+            `<@&${CLAN_ROLE_ID}> The meeting is live, please join now!`
         );
         
     } catch (error) {
@@ -454,6 +468,20 @@ async function finalizeAndCleanup(meetingId) {
     if (scheduledMeeting) {
         scheduledMeeting.status = 'completed';
         
+        // Delete Discord scheduled event
+        if (scheduledMeeting.eventId) {
+            try {
+                const guild = client.guilds.cache.first(); // Get first guild
+                const event = await guild.scheduledEvents.fetch(scheduledMeeting.eventId);
+                if (event) {
+                    await event.delete();
+                    console.log(`🗑️ Deleted Discord event: ${meeting.topic}`);
+                }
+            } catch (err) {
+                console.error('Error deleting Discord event:', err);
+            }
+        }
+        
         // Delete confirmation message
         if (scheduledMeeting.confirmationMsg) {
             try {
@@ -597,9 +625,9 @@ client.once(Events.ClientReady, async (c) => {
                     activeMeeting.waitingForEmpty = true;
                     console.log(`👥 ${activeMeeting.topic}: ${currentMembers.size} members still present - waiting for all to leave`);
                     
-                    // Notify that we're waiting
-                    const generalChannel = await client.channels.fetch(CHANNEL_ID);
-                    await generalChannel.send(
+                    // Notify in meeting summary channel that we're waiting
+                    const summaryChannel = await client.channels.fetch(MEETING_SUMMARY_CHANNEL_ID);
+                    await summaryChannel.send(
                         `⏱️ **Meeting Extended Beyond Scheduled Time**\n\n` +
                         `📝 ${activeMeeting.topic}\n` +
                         `🎙️ ${activeMeeting.channelName}\n` +
@@ -986,6 +1014,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
                             `⏰ Tracking will start automatically at meeting time.`
                 });
                 
+                // Create Discord Scheduled Event
+                const guild = interaction.guild;
+                const scheduledEvent = await guild.scheduledEvents.create({
+                    name: topic,
+                    scheduledStartTime: startTime,
+                    scheduledEndTime: endTime,
+                    privacyLevel: GuildScheduledEventPrivacyLevel.GuildOnly,
+                    entityType: GuildScheduledEventEntityType.Voice,
+                    channel: channel.id,
+                    description: `Scheduled meeting with automated attendance tracking.`
+                });
+                
                 scheduledMeetings.set(meetingId, {
                     startTime: startTime,
                     endTime: endTime,
@@ -994,7 +1034,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
                     channelName: channel.name,
                     creatorId: interaction.user.id,
                     confirmationMsg: confirmationMsg,
-                    status: 'scheduled'
+                    status: 'scheduled',
+                    eventId: scheduledEvent.id
                 });
                 
                 // Reply to user
@@ -1004,11 +1045,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
                             `🎙️ ${channel.name}\n` +
                             `🕐 ${startTimeDispStr} - ${endTimeDispStr} IST\n` +
                             `⏱️ Duration: ${durationStr}\n\n` +
-                            `Attendance tracking will start automatically.`,
+                            `Attendance tracking will start automatically.\n` +
+                            `📅 Discord event created!`,
                     flags: MessageFlags.Ephemeral
                 });
                 
-                console.log(`📅 Meeting scheduled by ${interaction.user.username}: ${topic} at ${startTimeDispStr}`);
+                console.log(`📅 Meeting scheduled by ${interaction.user.username}: ${topic} at ${startTimeDispStr} (Event ID: ${scheduledEvent.id})`);
                 
             } catch (error) {
                 console.error('Error scheduling meeting:', error);
@@ -1503,10 +1545,9 @@ async function handleVoiceJoin(userId, channel) {
             startTime: now,
             channelName: channel.name,
             participants: new Map(),
-            allParticipants: new Map(), // Store all participants who ever joined
             lastActivity: now
         });
-        console.log(`📊 Meeting started in voice channel: ${channel.name}`);
+        console.log(`📊 Lounge meeting started: ${channel.name}`);
     }
     
     const meeting = voiceMeetings.get(channelId);
@@ -1515,20 +1556,19 @@ async function handleVoiceJoin(userId, channel) {
     const user = await client.users.fetch(userId).catch(() => null);
     const username = user ? user.username : `User ${userId}`;
     
-    meeting.participants.set(userId, {
-        joinTime: now,
-        totalTime: 0,
-        sessions: [],
-        username: username
-    });
-    
-    // Also track in allParticipants if not already there
-    if (!meeting.allParticipants.has(userId)) {
-        meeting.allParticipants.set(userId, {
-            totalTime: 0,
-            sessions: [],
-            username: username
+    if (!meeting.participants.has(userId)) {
+        meeting.participants.set(userId, {
+            username: username,
+            joinedAt: now,
+            leftAt: null,
+            totalSeconds: 0,
+            sessions: []
         });
+    } else {
+        // Re-joining after disconnect
+        const participant = meeting.participants.get(userId);
+        participant.joinedAt = now;
+        participant.leftAt = null;
     }
     
     meeting.lastActivity = now;
@@ -1547,30 +1587,25 @@ async function handleVoiceLeave(userId, channel) {
     const meeting = voiceMeetings.get(channelId);
     const participant = meeting.participants.get(userId);
     
-    if (participant) {
+    if (participant && !participant.leftAt) {
         // Calculate session time
-        const sessionTime = now - participant.joinTime;
+        const sessionDuration = Math.floor((now - participant.joinedAt) / 1000);
+        participant.totalSeconds += sessionDuration;
+        participant.leftAt = now;
+        participant.sessions.push({
+            joinedAt: participant.joinedAt,
+            leftAt: now,
+            duration: sessionDuration
+        });
         
-        // Update allParticipants data
-        const allParticipantData = meeting.allParticipants.get(userId);
-        if (allParticipantData) {
-            allParticipantData.totalTime += sessionTime;
-            allParticipantData.sessions.push({
-                start: participant.joinTime,
-                end: now,
-                duration: sessionTime
-            });
-        }
-        
-        // Remove from active participants
-        meeting.participants.delete(userId);
         meeting.lastActivity = now;
         
-        const username = allParticipantData.username || `User ${userId}`;
-        console.log(`👤 ${username} left ${channel.name} (session: ${Math.round(sessionTime / 1000 / 60)} min)`);
+        const minutes = Math.floor(sessionDuration / 60);
+        console.log(`👤 ${participant.username} left ${channel.name} (session: ${minutes}m ${sessionDuration % 60}s)`);
         
-        // Check if meeting ended (no one left)
-        if (meeting.participants.size === 0) {
+        // Check if channel is now empty
+        const currentMembers = channel.members.filter(m => !m.user.bot);
+        if (currentMembers.size === 0) {
             await endMeeting(channelId, channel);
         }
     }
@@ -1583,7 +1618,7 @@ async function endMeeting(channelId, channel) {
     const now = Date.now();
     const meetingDuration = now - meeting.startTime;
     
-    // Check minimum duration (20 minutes)
+    // Check minimum duration (10 minutes)
     if (meetingDuration < MINIMUM_MEETING_DURATION) {
         console.log(`⏱️ Meeting in ${channel.name} too short (${Math.round(meetingDuration / 1000 / 60)} min), skipping summary`);
         voiceMeetings.delete(channelId);
@@ -1591,106 +1626,166 @@ async function endMeeting(channelId, channel) {
     }
     
     // If no participants recorded, skip
-    if (meeting.allParticipants.size === 0) {
+    if (meeting.participants.size === 0) {
         voiceMeetings.delete(channelId);
         return;
     }
     
-    await generateMeetingSummary(meeting, meetingDuration, channel, meeting.allParticipants);
+    await generateLoungeMeetingSummary(meeting, channel);
     voiceMeetings.delete(channelId);
 }
 
 async function generateMeetingSummary(meeting, totalDuration, channel, participants) {
     try {
-        const summaryChannelId = process.env.MEETING_SUMMARY_CHANNEL_ID || MEETING_SUMMARY_CHANNEL_ID;
-        const summaryChannel = await client.channels.fetch(summaryChannelId);
+        const now = Date.now();
+        const actualEndTime = now;
+        const meetingDuration = actualEndTime - meeting.startTime;
         
-        if (!summaryChannel) {
-            console.error('Meeting summary channel not found');
+        const hours = Math.floor(meetingDuration / 1000 / 60 / 60);
+        const minutes = Math.floor((meetingDuration / 1000 / 60) % 60);
+        const durationStr = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+        
+        // Process participants: clip sessions, calculate attendance
+        const participantList = [];
+        const totalMeetingSeconds = meetingDuration / 1000;
+        
+        for (const [userId, participant] of meeting.participants) {
+            let totalSeconds = 0;
+            
+            for (const session of participant.sessions) {
+                const sessionStart = session.joinedAt;
+                const sessionEnd = session.leftAt;
+                
+                const clippedStart = Math.max(sessionStart, meeting.startTime);
+                const clippedEnd = Math.min(sessionEnd, actualEndTime);
+                
+                if (clippedEnd > clippedStart) {
+                    totalSeconds += (clippedEnd - clippedStart) / 1000;
+                }
+            }
+            
+            // Filter out users with less than 10 minutes
+            if (totalSeconds >= 10 * 60) {
+                participantList.push({
+                    username: participant.username,
+                    totalSeconds: totalSeconds,
+                    percentage: Math.round((totalSeconds / totalMeetingSeconds) * 100)
+                });
+            }
+        }
+        
+        if (participantList.length === 0) {
+            console.log('No qualified participants for Lounge meeting summary');
             return;
         }
         
-        // Format date
-        const meetingDate = new Date(meeting.startTime);
-        const dateStr = meetingDate.toLocaleDateString('en-IN', {
-            timeZone: 'Asia/Kolkata',
-            weekday: 'long',
-            year: 'numeric',
-            month: 'long',
-            day: 'numeric'
-        });
-        const timeStr = meetingDate.toLocaleTimeString('en-IN', {
-            timeZone: 'Asia/Kolkata',
-            hour: '2-digit',
-            minute: '2-digit'
-        });
+        // Sort by total time descending
+        participantList.sort((a, b) => b.totalSeconds - a.totalSeconds);
         
-        // Format duration
-        const hours = Math.floor(totalDuration / (1000 * 60 * 60));
-        const minutes = Math.floor((totalDuration % (1000 * 60 * 60)) / (1000 * 60));
-        const durationStr = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+        let summaryText = '📊 **Meeting Summary - Lounge**\n\n';
+        summaryText += `⏱️ **Duration:** ${durationStr}\n\n`;
+        summaryText += '👥 **Attendance:**\n';
         
-        // Build participant list
-        let participantList = '';
-        let totalParticipantTime = 0;
-        
-        for (const [userId, data] of participants.entries()) {
-            const username = data.username || `User ${userId}`;
+        participantList.forEach((user, index) => {
+            const userHours = Math.floor(user.totalSeconds / 3600);
+            const userMinutes = Math.floor((user.totalSeconds % 3600) / 60);
+            const timeStr = userHours > 0 ? `${userHours}h ${userMinutes}m` : `${userMinutes}m`;
             
-            const userMinutes = Math.round(data.totalTime / 1000 / 60);
-            const percentage = ((data.totalTime / totalDuration) * 100).toFixed(1);
+            // Award star for 95%+ attendance
+            const star = user.percentage >= 95 ? ' ⭐' : '';
             
-            participantList += `• **${username}**: ${userMinutes} minutes (${percentage}%)\n`;
-            totalParticipantTime += data.totalTime;
+            summaryText += `${index + 1}. ${user.username}: ${timeStr} (${user.percentage}%)${star}\n`;
+        });
+        
+        const channelObj = await client.channels.fetch(UPDATES_CHANNEL_ID);
+        if (channelObj) {
+            await channelObj.send(summaryText);
+            console.log('✅ Lounge meeting summary posted to updates channel');
         }
-        
-        // Calculate average
-        const avgTime = Math.round((totalParticipantTime / participants.size) / 1000 / 60);
-        
-        // Create summary embed
-        const summaryEmbed = {
-            color: 0x5865F2,
-            title: '🎙️ Voice Meeting Summary',
-            fields: [
-                {
-                    name: '📅 Date',
-                    value: `${dateStr} at ${timeStr}`,
-                    inline: false
-                },
-                {
-                    name: '🏷️ Channel',
-                    value: meeting.channelName,
-                    inline: true
-                },
-                {
-                    name: '⏱️ Total Duration',
-                    value: durationStr,
-                    inline: true
-                },
-                {
-                    name: '👥 Participants',
-                    value: participantList || 'No participants',
-                    inline: false
-                },
-                {
-                    name: '📊 Statistics',
-                    value: `Total Participants: ${participants.size}\nAverage Active Time: ${avgTime} minutes`,
-                    inline: false
-                }
-            ],
-            timestamp: new Date().toISOString(),
-            footer: {
-                text: 'BeeLert Meeting Tracker'
-            }
-        };
-        
-        await summaryChannel.send({ embeds: [summaryEmbed] });
-        console.log(`✅ Meeting summary posted for ${meeting.channelName}`);
-        
     } catch (error) {
-        console.error('Error generating meeting summary:', error);
+        console.error('Error generating Lounge meeting summary:', error);
     }
 }
+
+// Bot ready event - recover scheduled meetings from Discord events
+client.once(Events.ClientReady, async () => {
+    console.log(`✅ Bot logged in as ${client.user.tag}`);
+    
+    try {
+        // Fetch all guilds
+        for (const [guildId, guild] of client.guilds.cache) {
+            console.log(`🔍 Checking scheduled events in guild: ${guild.name}`);
+            
+            // Fetch all scheduled events
+            const events = await guild.scheduledEvents.fetch();
+            
+            for (const [eventId, event] of events) {
+                // Only process SCHEDULED or ACTIVE voice events
+                if (event.entityType === GuildScheduledEventEntityType.Voice && 
+                    (event.status === 1 || event.status === 2)) { // 1=SCHEDULED, 2=ACTIVE
+                    
+                    const now = Date.now();
+                    const startTime = event.scheduledStartTime.getTime();
+                    const endTime = event.scheduledEndTime.getTime();
+                    
+                    // Only restore if meeting hasn't ended yet
+                    if (endTime > now) {
+                        const meetingId = `meeting_${eventId}`;
+                        
+                        // Check if meeting should be active now
+                        if (startTime <= now && endTime > now && event.status === 2) {
+                            console.log(`🔄 Restoring ACTIVE meeting: ${event.name}`);
+                            
+                            // Start tracking immediately
+                            const channel = await client.channels.fetch(event.channelId);
+                            if (channel) {
+                                // Add to scheduled meetings first
+                                scheduledMeetings.set(meetingId, {
+                                    startTime: startTime,
+                                    endTime: endTime,
+                                    topic: event.name,
+                                    channelId: event.channelId,
+                                    channelName: channel.name,
+                                    creatorId: null,
+                                    confirmationMsg: null,
+                                    status: 'active',
+                                    eventId: eventId
+                                });
+                                
+                                // Start tracking
+                                await startAutomatedTracking(scheduledMeetings.get(meetingId), meetingId);
+                                console.log(`✅ Resumed tracking: ${event.name}`);
+                            }
+                        } else if (startTime > now) {
+                            // Future meeting - restore to scheduled meetings
+                            console.log(`📅 Restoring scheduled meeting: ${event.name}`);
+                            
+                            const channel = await client.channels.fetch(event.channelId);
+                            scheduledMeetings.set(meetingId, {
+                                startTime: startTime,
+                                endTime: endTime,
+                                topic: event.name,
+                                channelId: event.channelId,
+                                channelName: channel ? channel.name : 'Unknown',
+                                creatorId: null,
+                                confirmationMsg: null,
+                                status: 'scheduled',
+                                eventId: eventId
+                            });
+                            
+                            console.log(`✅ Restored: ${event.name} (starts at ${new Date(startTime).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })})`);
+                        }
+                    }
+                }
+            }
+        }
+        
+        console.log(`✅ Event recovery complete. ${scheduledMeetings.size} meetings restored.`);
+        
+    } catch (error) {
+        console.error('❌ Error recovering scheduled events:', error);
+    }
+});
 
 // Error handling
 client.on(Events.Error, error => {
