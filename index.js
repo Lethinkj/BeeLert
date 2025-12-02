@@ -961,15 +961,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 const startTime = new Date(`${targetDate.year}-${targetDate.month.toString().padStart(2, '0')}-${targetDate.day.toString().padStart(2, '0')}T${startHours.toString().padStart(2, '0')}:${startMinutes.toString().padStart(2, '0')}:00+05:30`);
                 const endTime = new Date(`${targetDate.year}-${targetDate.month.toString().padStart(2, '0')}-${targetDate.day.toString().padStart(2, '0')}T${endHours.toString().padStart(2, '0')}:${endMinutes.toString().padStart(2, '0')}:00+05:30`);
                 
-                // Validate times
-                if (startTime <= now) {
+                // Validate times (compare in UTC)
+                const nowUtc = Date.now();
+                if (startTime.getTime() <= nowUtc) {
                     return interaction.reply({
                         content: '❌ Start time must be in the future.',
                         flags: MessageFlags.Ephemeral
                     });
                 }
                 
-                if (endTime <= startTime) {
+                if (endTime.getTime() <= startTime.getTime()) {
                     return interaction.reply({
                         content: '❌ End time must be after start time.',
                         flags: MessageFlags.Ephemeral
@@ -1633,7 +1634,7 @@ async function endMeeting(channelId, channel) {
         return;
     }
     
-    await generateLoungeMeetingSummary(meeting, channel);
+    await generateMeetingSummary(meeting, meetingDuration, channel, meeting.participants);
     voiceMeetings.delete(channelId);
 }
 
