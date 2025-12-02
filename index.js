@@ -470,17 +470,23 @@ async function finalizeAndCleanup(meetingId) {
     if (scheduledMeeting) {
         scheduledMeeting.status = 'completed';
         
-        // Delete Discord scheduled event
+        // Complete and delete Discord scheduled event
         if (scheduledMeeting.eventId) {
             try {
                 const guild = client.guilds.cache.first(); // Get first guild
                 const event = await guild.scheduledEvents.fetch(scheduledMeeting.eventId);
                 if (event) {
+                    // Set to COMPLETED first (status 3)
+                    if (event.status !== 3 && event.status !== 4) { // Not already COMPLETED or CANCELED
+                        await event.setStatus(3); // 3 = COMPLETED
+                        console.log(`✅ Discord event marked as completed: ${meeting.topic}`);
+                    }
+                    // Then delete it
                     await event.delete();
                     console.log(`🗑️ Deleted Discord event: ${meeting.topic}`);
                 }
             } catch (err) {
-                console.error('Error deleting Discord event:', err);
+                console.error('Error managing Discord event:', err);
             }
         }
         
@@ -1721,13 +1727,27 @@ client.once(Events.ClientReady, async () => {
             const events = await guild.scheduledEvents.fetch();
             
             for (const [eventId, event] of events) {
+                const now = Date.now();
+                const startTime = event.scheduledStartTime?.getTime();
+                const endTime = event.scheduledEndTime?.getTime();
+                
+                // Clean up stale ACTIVE events that should have ended
+                if (event.entityType === GuildScheduledEventEntityType.Voice && 
+                    event.status === 2 && endTime && endTime < now) {
+                    console.log(`🧹 Cleaning up stale ACTIVE event: ${event.name} (ended ${Math.round((now - endTime) / 60000)} min ago)`);
+                    try {
+                        await event.setStatus(3); // Mark as COMPLETED
+                        await event.delete();
+                        console.log(`✅ Cleaned up stale event: ${event.name}`);
+                    } catch (err) {
+                        console.error(`Error cleaning up event ${event.name}:`, err.message);
+                    }
+                    continue;
+                }
+                
                 // Only process SCHEDULED or ACTIVE voice events
                 if (event.entityType === GuildScheduledEventEntityType.Voice && 
                     (event.status === 1 || event.status === 2)) { // 1=SCHEDULED, 2=ACTIVE
-                    
-                    const now = Date.now();
-                    const startTime = event.scheduledStartTime.getTime();
-                    const endTime = event.scheduledEndTime.getTime();
                     
                     // Only restore if meeting hasn't ended yet
                     if (endTime > now) {
