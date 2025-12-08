@@ -1808,7 +1808,7 @@ client.once(Events.ClientReady, async () => {
     }
 });
 
-// Error handling
+// Error Handling
 client.on(Events.Error, error => {
     console.error('Discord client error:', error);
     botStatus.isOnline = false;
