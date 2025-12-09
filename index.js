@@ -1819,7 +1819,18 @@ process.on('unhandledRejection', error => {
 });
 
 // Login to Discord
-client.login(BOT_TOKEN).catch(error => {
-    console.error('Failed to login:', error);
+console.log('🔐 Attempting to login to Discord...');
+if (!BOT_TOKEN) {
+    console.error('❌ BOT_TOKEN is not set in environment variables!');
     process.exit(1);
-});
+}
+
+client.login(BOT_TOKEN)
+    .then(() => {
+        console.log('✅ Discord login successful');
+    })
+    .catch(error => {
+        console.error('❌ Failed to login to Discord:', error);
+        console.error('Token present:', BOT_TOKEN ? 'Yes (length: ' + BOT_TOKEN.length + ')' : 'No');
+        process.exit(1);
+    });
