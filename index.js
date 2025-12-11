@@ -62,6 +62,22 @@ const CLAN_MEMBERS = [
     '1174295899745296438', // Lethin
 ];
 
+// Birthday data
+const BIRTHDAYS = [
+    { userId: '1187606759351799970', name: 'Jijo', date: '09/01' },
+    { userId: '1344618947185606707', name: 'Beule', date: '26/03' },
+    { userId: '1181238306671968256', name: 'Archana', date: '02/04' },
+    { userId: '1097767757434597398', name: 'Bennyhinn', date: '18/04' },
+    { userId: '1174295899745296438', name: 'Lethin', date: '24/04' },
+    { userId: '1171801933158285354', name: 'Shaniya', date: '10/05' },
+    { userId: '1337604789378482228', name: 'Arthi', date: '03/07' },
+    { userId: '1344619303688998934', name: 'Shailu', date: '03/10' },
+    { userId: '1259881373309861888', name: 'Alisha', date: '18/10' },
+    { userId: '1173582369484177470', name: 'Ashif', date: '08/11' },
+    { userId: '1308385757576036412', name: 'Lifnan', date: '08/12' },
+    { userId: '1309201554787664026', name: 'Anitus', date: '11/12' }
+];
+
 // Bot status tracking
 let botStatus = {
     isOnline: false,
@@ -571,6 +587,51 @@ client.once(Events.ClientReady, async (c) => {
     });
 
     console.log('Daily scheduler started - will post at 9:00 PM IST every day');
+    
+    // Schedule birthday checker (runs daily at 9:00 AM IST)
+    cron.schedule('0 9 * * *', async () => {
+        console.log('Running birthday check...');
+        
+        const now = getISTTime();
+        const today = now.toLocaleDateString('en-GB', {
+            timeZone: 'Asia/Kolkata',
+            day: '2-digit',
+            month: '2-digit'
+        }); // Returns DD/MM format
+        
+        // Find today's birthdays
+        const todaysBirthdays = BIRTHDAYS.filter(b => b.date === today);
+        
+        if (todaysBirthdays.length > 0) {
+            const channel = await client.channels.fetch(CHANNEL_ID);
+            
+            for (const person of todaysBirthdays) {
+                try {
+                    // Generate AI birthday wish
+                    const birthdayWish = await aiService.askQuestion(
+                        `Generate a heartfelt birthday wish for ${person.name}. ` +
+                        `Include a meaningful quote and warm wishes. ` +
+                        `Make it personal, inspiring, and celebratory. ` +
+                        `Keep it under 150 words. Format it beautifully.`
+                    );
+                    
+                    const wishMessage = 
+                        `🎉🎂 **HAPPY BIRTHDAY** <@${person.userId}>! 🎂🎉\n\n` +
+                        `${birthdayWish}\n\n` +
+                        `— With love from the Aura-7F fam 💙`;
+                    
+                    await channel.send(wishMessage);
+                    console.log(`✅ Posted AI birthday wish for ${person.name}`);
+                } catch (error) {
+                    console.error(`Error posting birthday wish for ${person.name}:`, error);
+                }
+            }
+        }
+    }, {
+        timezone: 'Asia/Kolkata'
+    });
+    
+    console.log('Birthday checker started - will check daily at 9:00 AM IST');
     
     // Schedule personal reminder checker (runs every minute)
     cron.schedule('* * * * *', async () => {
