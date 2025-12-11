@@ -172,9 +172,7 @@ app.listen(PORT, () => {
 
 // Helper function to get current IST time
 function getISTTime() {
-    const now = new Date();
-    const istTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
-    return istTime;
+    return new Date();
 }
 
 // Helper function to format IST time
