@@ -588,9 +588,9 @@ client.once(Events.ClientReady, async (c) => {
 
     console.log('Daily scheduler started - will post at 9:00 PM IST every day');
     
-    // Schedule birthday checker (runs daily at 9:00 AM IST)
-    cron.schedule('0 9 * * *', async () => {
-        console.log('Running birthday check...');
+    // Schedule birthday checker (runs daily at 7:00 AM IST)
+    cron.schedule('0 7 * * *', async () => {
+        console.log('Running daily birthday check at 7:00 AM IST...');
         
         const now = getISTTime();
         const today = now.toLocaleDateString('en-GB', {
@@ -612,7 +612,9 @@ client.once(Events.ClientReady, async (c) => {
                         `Generate a heartfelt birthday wish for ${person.name}. ` +
                         `Include a meaningful quote and warm wishes. ` +
                         `Make it personal, inspiring, and celebratory. ` +
-                        `Keep it under 150 words. Format it beautifully.`
+                        `Keep it under 150 words. Format it beautifully. ` +
+                        `Do NOT include any signature, closing, or "With love" at the end. ` +
+                        `The message should end after the birthday wishes and quote.`
                     );
                     
                     const wishMessage = 
@@ -631,7 +633,49 @@ client.once(Events.ClientReady, async (c) => {
         timezone: 'Asia/Kolkata'
     });
     
-    console.log('Birthday checker started - will check daily at 9:00 AM IST');
+    console.log('Birthday checker started - will check daily at 7:00 AM IST');
+    
+    // Check birthdays on bot startup (backup in case bot started after 7 AM)
+    setTimeout(async () => {
+        console.log('Running startup birthday check (backup)...');
+        const now = getISTTime();
+        const today = now.toLocaleDateString('en-GB', {
+            timeZone: 'Asia/Kolkata',
+            day: '2-digit',
+            month: '2-digit'
+        });
+        
+        const todaysBirthdays = BIRTHDAYS.filter(b => b.date === today);
+        
+        if (todaysBirthdays.length > 0) {
+            const channel = await client.channels.fetch(CHANNEL_ID);
+            
+            for (const person of todaysBirthdays) {
+                try {
+                    const birthdayWish = await aiService.askQuestion(
+                        `Generate a heartfelt birthday wish for ${person.name}. ` +
+                        `Include a meaningful quote and warm wishes. ` +
+                        `Make it personal, inspiring, and celebratory. ` +
+                        `Keep it under 150 words. Format it beautifully. ` +
+                        `Do NOT include any signature, closing, or "With love" at the end. ` +
+                        `The message should end after the birthday wishes and quote.`
+                    );
+                    
+                    const wishMessage = 
+                        `🎉🎂 **HAPPY BIRTHDAY** <@${person.userId}>! 🎂🎉\n\n` +
+                        `${birthdayWish}\n\n` +
+                        `— With love from the Aura-7F fam 💙`;
+                    
+                    await channel.send(wishMessage);
+                    console.log(`✅ Posted startup birthday wish for ${person.name}`);
+                } catch (error) {
+                    console.error(`Error posting startup birthday wish:`, error);
+                }
+            }
+        } else {
+            console.log(`No birthdays today (${today})`);
+        }
+    }, 5000); // Wait 5 seconds after bot is ready
     
     // Schedule personal reminder checker (runs every minute)
     cron.schedule('* * * * *', async () => {
@@ -1492,6 +1536,52 @@ client.on(Events.MessageCreate, async (message) => {
 
         await message.reply('Sending test update message...');
         await sendDailyUpdate();
+    }
+    
+    // !checkbirthday command (manual trigger for testing)
+    if (message.content === '!checkbirthday') {
+        console.log('Manual birthday check triggered by', message.author.tag);
+        const now = getISTTime();
+        const today = now.toLocaleDateString('en-GB', {
+            timeZone: 'Asia/Kolkata',
+            day: '2-digit',
+            month: '2-digit'
+        });
+        
+        console.log(`Current IST Date: ${today}`);
+        
+        const todaysBirthdays = BIRTHDAYS.filter(b => b.date === today);
+        
+        if (todaysBirthdays.length > 0) {
+            await message.reply(`Found ${todaysBirthdays.length} birthday(s) today (${today}): ${todaysBirthdays.map(b => b.name).join(', ')}\nPosting wishes...`);
+            
+            const channel = await client.channels.fetch(CHANNEL_ID);
+            
+            for (const person of todaysBirthdays) {
+                try {
+                    const birthdayWish = await aiService.askQuestion(
+                        `Generate a heartfelt birthday wish for ${person.name}. ` +
+                        `Include a meaningful quote and warm wishes. ` +
+                        `Make it personal, inspiring, and celebratory. ` +
+                        `Keep it under 150 words. Format it beautifully. ` +
+                        `Do NOT include any signature, closing, or "With love" at the end. ` +
+                        `The message should end after the birthday wishes and quote.`
+                    );
+                    
+                    const wishMessage = 
+                        `🎉🎂 **HAPPY BIRTHDAY** <@${person.userId}>! 🎂🎉\n\n` +
+                        `${birthdayWish}\n\n` +
+                        `— With love from the Aura-7F fam 💙`;
+                    
+                    await channel.send(wishMessage);
+                    console.log(`✅ Posted manual birthday wish for ${person.name}`);
+                } catch (error) {
+                    console.error(`Error posting manual birthday wish:`, error);
+                }
+            }
+        } else {
+            await message.reply(`No birthdays found for today (${today}). Available birthdays: ${BIRTHDAYS.map(b => `${b.name} - ${b.date}`).join(', ')}`);
+        }
     }
     
     // !help command
