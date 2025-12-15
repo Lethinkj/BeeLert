@@ -967,6 +967,20 @@ client.on(Events.InteractionCreate, async (interaction) => {
                         });
                     }
                     
+                    // Delete Discord event if it exists
+                    if (meeting.eventId) {
+                        try {
+                            const guild = interaction.guild;
+                            const event = await guild.scheduledEvents.fetch(meeting.eventId);
+                            if (event) {
+                                await event.delete();
+                                console.log(`🗑️ Deleted Discord event for cancelled meeting: ${meeting.topic}`);
+                            }
+                        } catch (error) {
+                            console.error(`Error deleting Discord event:`, error.message);
+                        }
+                    }
+                    
                     clearTimeout(meeting.timeoutId);
                     scheduledMeetings.delete(meetingId);
                     
@@ -1895,6 +1909,19 @@ client.once(Events.ClientReady, async () => {
                 const startTime = event.scheduledStartTime?.getTime();
                 const endTime = event.scheduledEndTime?.getTime();
                 
+                // Clean up old COMPLETED or CANCELED events (status 3 or 4)
+                if (event.entityType === GuildScheduledEventEntityType.Voice && 
+                    (event.status === 3 || event.status === 4)) {
+                    console.log(`🧹 Cleaning up old ${event.status === 3 ? 'COMPLETED' : 'CANCELED'} event: ${event.name}`);
+                    try {
+                        await event.delete();
+                        console.log(`✅ Deleted old event: ${event.name}`);
+                    } catch (err) {
+                        console.error(`Error deleting event ${event.name}:`, err.message);
+                    }
+                    continue;
+                }
+                
                 // Clean up stale ACTIVE events that should have ended
                 if (event.entityType === GuildScheduledEventEntityType.Voice && 
                     event.status === 2 && endTime && endTime < now) {
@@ -1905,6 +1932,19 @@ client.once(Events.ClientReady, async () => {
                         console.log(`✅ Cleaned up stale event: ${event.name}`);
                     } catch (err) {
                         console.error(`Error cleaning up event ${event.name}:`, err.message);
+                    }
+                    continue;
+                }
+                
+                // Clean up SCHEDULED events that are past their end time
+                if (event.entityType === GuildScheduledEventEntityType.Voice && 
+                    event.status === 1 && endTime && endTime < now) {
+                    console.log(`🧹 Cleaning up expired SCHEDULED event: ${event.name} (ended ${Math.round((now - endTime) / 60000)} min ago)`);
+                    try {
+                        await event.delete();
+                        console.log(`✅ Deleted expired event: ${event.name}`);
+                    } catch (err) {
+                        console.error(`Error deleting event ${event.name}:`, err.message);
                     }
                     continue;
                 }
