@@ -1618,6 +1618,39 @@ client.on(Events.MessageCreate, async (message) => {
         }
     }
     
+    // !deleteevents command (admin only) - Delete all bot-created events
+    if (message.content === '!deleteevents') {
+        if (!message.member.permissions.has('Administrator')) {
+            await message.reply('❌ Only administrators can use this command.');
+            return;
+        }
+        
+        try {
+            const guild = message.guild;
+            const events = await guild.scheduledEvents.fetch();
+            let deletedCount = 0;
+            
+            for (const [eventId, event] of events) {
+                // Check if event was created by bot (has our description)
+                if (event.description === 'Scheduled meeting with automated attendance tracking.' ||
+                    event.entityType === GuildScheduledEventEntityType.Voice) {
+                    try {
+                        await event.delete();
+                        deletedCount++;
+                        console.log(`🗑️ Deleted event: ${event.name}`);
+                    } catch (err) {
+                        console.error(`Error deleting event ${event.name}:`, err.message);
+                    }
+                }
+            }
+            
+            await message.reply(`✅ Deleted ${deletedCount} bot-created event(s).`);
+        } catch (error) {
+            console.error('Error deleting events:', error);
+            await message.reply('❌ Error deleting events.');
+        }
+    }
+    
     // !help command
     if (message.content === '!help') {
         const helpMessage = `🤖 **BeeLert Bot Commands**\n\n` +
@@ -1634,7 +1667,9 @@ client.on(Events.MessageCreate, async (message) => {
             `Messages auto-delete after 24 hours.\n\n` +
             `💡 **Daily Updates:** Automatic at 9:00 PM IST with fresh AI-generated motivation!\n` +
             `🎙️ **Meeting Tracking:** Automatic tracking in Lounge voice channel (10 min minimum)\n` +
-            `📊 **Meeting Summaries:** Posted in <#${MEETING_SUMMARY_CHANNEL_ID}> after meetings end`;
+            `📊 **Meeting Summaries:** Posted in <#${MEETING_SUMMARY_CHANNEL_ID}> after meetings end\n\n` +
+            `🛠️ **Admin Commands:**\n` +
+            `\`!deleteevents\` - Delete all bot-created Discord events`;
         
         await message.reply(helpMessage);
     }
@@ -1915,6 +1950,22 @@ client.once(Events.ClientReady, async () => {
                 const now = Date.now();
                 const startTime = event.scheduledStartTime?.getTime();
                 const endTime = event.scheduledEndTime?.getTime();
+                
+                // Check if event was created by bot
+                const isBotEvent = event.description === 'Scheduled meeting with automated attendance tracking.' ||
+                                   (event.entityType === GuildScheduledEventEntityType.Voice && event.creatorId === client.user.id);
+                
+                // Delete all past bot-created events regardless of status
+                if (isBotEvent && endTime && endTime < now) {
+                    console.log(`🧹 Deleting past bot event: ${event.name} (ended ${Math.round((now - endTime) / 60000)} min ago)`);
+                    try {
+                        await event.delete();
+                        console.log(`✅ Deleted past event: ${event.name}`);
+                    } catch (err) {
+                        console.error(`Error deleting event ${event.name}:`, err.message);
+                    }
+                    continue;
+                }
                 
                 // Clean up old COMPLETED or CANCELED events (status 3 or 4)
                 if (event.entityType === GuildScheduledEventEntityType.Voice && 
