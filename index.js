@@ -678,7 +678,14 @@ client.once(Events.ClientReady, async (c) => {
     // Schedule personal reminder checker (runs every minute)
     cron.schedule('* * * * *', async () => {
         const now = getISTTime();
-        const currentTime = `${now.getHours()}:${now.getMinutes().toString().padStart(2, '0')}`;
+        // Convert to IST time string (H:MM format)
+        const istTimeString = now.toLocaleTimeString('en-US', {
+            timeZone: 'Asia/Kolkata',
+            hour: 'numeric',
+            minute: '2-digit',
+            hour12: false
+        });
+        const currentTime = istTimeString.replace(/^(\d+):(\d+):\d+$/, '$1:$2'); // Remove seconds
         
         for (const [userId, settings] of userReminders.entries()) {
             if (!settings.active) continue;
@@ -693,7 +700,7 @@ client.once(Events.ClientReady, async (c) => {
                     "Keep the momentum going! 🚀";
                 
                 await user.send(settings.customMessage || defaultMessage);
-                console.log(`✅ Sent reminder to ${user.username} at ${currentTime}`);
+                console.log(`✅ Sent reminder to ${user.username} at ${currentTime} IST`);
             } catch (error) {
                 console.error(`❌ Cannot DM user ${userId}:`, error.message);
                 // Optionally disable reminder if user has DMs closed for too long
