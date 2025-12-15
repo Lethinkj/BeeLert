@@ -178,18 +178,17 @@ function getISTTime() {
     return new Date(Date.now() + IST_OFFSET_MS);
 }
 
-// Helper function to format IST time
+// Helper function to format IST time (date is already IST-adjusted from getISTTime())
 function formatISTTime(date) {
-    return date.toLocaleString('en-US', {
-        timeZone: 'Asia/Kolkata',
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-        hour12: true
-    }) + ' IST';
+    const year = date.getFullYear();
+    const month = (date.getMonth() + 1).toString().padStart(2, '0');
+    const day = date.getDate().toString().padStart(2, '0');
+    const hours = date.getHours();
+    const minutes = date.getMinutes().toString().padStart(2, '0');
+    const seconds = date.getSeconds().toString().padStart(2, '0');
+    const ampm = hours >= 12 ? 'PM' : 'AM';
+    const hours12 = hours % 12 || 12;
+    return `${month}/${day}/${year}, ${hours12}:${minutes}:${seconds} ${ampm} IST`;
 }
 
 // Function to post Meeting Manager interface
@@ -522,14 +521,11 @@ async function finalizeAndCleanup(meetingId) {
 }
 
 // Generate attendance summary for scheduled meeting
-// Helper function to format date for daily update
+// Helper function to format date for daily update (date is already IST-adjusted)
 function formatISTDate(date) {
-    return date.toLocaleString('en-US', {
-        timeZone: 'Asia/Kolkata',
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric'
-    });
+    const months = ['January', 'February', 'March', 'April', 'May', 'June', 
+                   'July', 'August', 'September', 'October', 'November', 'December'];
+    return `${months[date.getMonth()]} ${date.getDate()}, ${date.getFullYear()}`;
 }
 
 // Send daily progress update
@@ -594,11 +590,10 @@ client.once(Events.ClientReady, async (c) => {
         console.log('Running daily birthday check at 7:00 AM IST...');
         
         const now = getISTTime();
-        const today = now.toLocaleDateString('en-GB', {
-            timeZone: 'Asia/Kolkata',
-            day: '2-digit',
-            month: '2-digit'
-        }); // Returns DD/MM format
+        // getISTTime() already returns IST-adjusted time, use direct methods
+        const day = now.getDate().toString().padStart(2, '0');
+        const month = (now.getMonth() + 1).toString().padStart(2, '0');
+        const today = `${day}/${month}`; // DD/MM format
         
         // Find today's birthdays
         const todaysBirthdays = BIRTHDAYS.filter(b => b.date === today);
@@ -640,11 +635,10 @@ client.once(Events.ClientReady, async (c) => {
     setTimeout(async () => {
         console.log('Running startup birthday check (backup)...');
         const now = getISTTime();
-        const today = now.toLocaleDateString('en-GB', {
-            timeZone: 'Asia/Kolkata',
-            day: '2-digit',
-            month: '2-digit'
-        });
+        // getISTTime() already returns IST-adjusted time, use direct methods
+        const day = now.getDate().toString().padStart(2, '0');
+        const month = (now.getMonth() + 1).toString().padStart(2, '0');
+        const today = `${day}/${month}`; // DD/MM format
         
         const todaysBirthdays = BIRTHDAYS.filter(b => b.date === today);
         
@@ -1542,9 +1536,26 @@ client.on(Events.MessageCreate, async (message) => {
         const hours = Math.floor(timeDiff / (1000 * 60 * 60));
         const minutes = Math.floor((timeDiff % (1000 * 60 * 60)) / (1000 * 60));
 
+        // Format times directly since getISTTime() already returns IST
+        const formatTime = (date) => {
+            const h = date.getHours();
+            const m = date.getMinutes().toString().padStart(2, '0');
+            const s = date.getSeconds().toString().padStart(2, '0');
+            const ampm = h >= 12 ? 'PM' : 'AM';
+            const h12 = h % 12 || 12;
+            return `${h12}:${m}:${s} ${ampm}`;
+        };
+        const formatTimeShort = (date) => {
+            const h = date.getHours();
+            const m = date.getMinutes().toString().padStart(2, '0');
+            const ampm = h >= 12 ? 'PM' : 'AM';
+            const h12 = h % 12 || 12;
+            return `${h12}:${m} ${ampm}`;
+        };
+
         const statusMsg = `✅ **Bot Status**\n\n` +
-            `**Current Time (IST):** ${now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })}\n` +
-            `**Next Update:** ${nextUpdate.toLocaleString('en-US', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true })} IST\n` +
+            `**Current Time (IST):** ${formatTime(now)}\n` +
+            `**Next Update:** ${formatTimeShort(nextUpdate)} IST\n` +
             `**Time Until Update:** ${hours}h ${minutes}m\n` +
             `**Channel:** <#${CHANNEL_ID}>\n` +
             `**Monitoring Role:** ${ROLE_NAME}`;
@@ -1566,11 +1577,10 @@ client.on(Events.MessageCreate, async (message) => {
     if (message.content === '!checkbirthday') {
         console.log('Manual birthday check triggered by', message.author.tag);
         const now = getISTTime();
-        const today = now.toLocaleDateString('en-GB', {
-            timeZone: 'Asia/Kolkata',
-            day: '2-digit',
-            month: '2-digit'
-        });
+        // getISTTime() already returns IST-adjusted time, use direct methods
+        const day = now.getDate().toString().padStart(2, '0');
+        const month = (now.getMonth() + 1).toString().padStart(2, '0');
+        const today = `${day}/${month}`; // DD/MM format
         
         console.log(`Current IST Date: ${today}`);
         
