@@ -170,36 +170,12 @@ app.listen(PORT, () => {
     console.log(`Status check: http://localhost:${PORT}/status`);
 });
 
-// Time synchronization with World Time API
-let timeOffset = null; // null = not synced, number = offset in ms
-const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000; // IST is UTC+5:30
-
-async function syncTime() {
-    try {
-        const serverTime = Date.now();
-        const response = await fetch('https://worldtimeapi.org/api/timezone/Asia/Kolkata');
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const data = await response.json();
-        const actualTime = new Date(data.datetime).getTime();
-        timeOffset = actualTime - serverTime;
-        
-        const offsetSeconds = Math.round(timeOffset / 1000);
-        console.log(`⏰ IST time synced via API. Offset: ${offsetSeconds}s`);
-    } catch (error) {
-        console.log(`⚠️ Time sync failed (${error.message}), using UTC+5:30 calculation`);
-        timeOffset = null; // Use fallback calculation
-    }
-}
+// IST is UTC+5:30 (Render uses UTC/GMT)
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000; // 5 hours 30 minutes in milliseconds
 
 // Helper function to get current IST time
 function getISTTime() {
-    if (timeOffset !== null) {
-        // Use synced offset
-        return new Date(Date.now() + timeOffset);
-    } else {
-        // Fallback: Calculate IST from UTC (UTC + 5:30)
-        return new Date(Date.now() + IST_OFFSET_MS);
-    }
+    return new Date(Date.now() + IST_OFFSET_MS);
 }
 
 // Helper function to format IST time
@@ -2042,12 +2018,6 @@ client.on(Events.Error, error => {
 process.on('unhandledRejection', error => {
     console.error('Unhandled promise rejection:', error);
 });
-
-// Sync time on startup and every 6 hours
-(async () => {
-    await syncTime(); // Initial sync
-    setInterval(syncTime, 6 * 60 * 60 * 1000); // Sync every 6 hours
-})();
 
 // Login to Discord
 console.log('🔐 Attempting to login to Discord...');
