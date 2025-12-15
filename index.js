@@ -687,8 +687,16 @@ client.once(Events.ClientReady, async (c) => {
         });
         const currentTime = istTimeString.replace(/^(\d+):(\d+):\d+$/, '$1:$2'); // Remove seconds
         
+        // Debug log every minute (comment out after testing)
+        if (userReminders.size > 0) {
+            console.log(`⏰ Checking reminders at IST: ${currentTime}`);
+        }
+        
         for (const [userId, settings] of userReminders.entries()) {
             if (!settings.active) continue;
+            
+            console.log(`   Comparing: "${settings.time}" vs "${currentTime}" for user ${userId}`);
+            
             if (settings.time !== currentTime) continue;
             
             try {
