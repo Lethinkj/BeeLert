@@ -170,9 +170,28 @@ app.listen(PORT, () => {
     console.log(`Status check: http://localhost:${PORT}/status`);
 });
 
+// Time synchronization with World Time API
+let timeOffset = 0; // Offset between server time and actual IST
+
+async function syncTime() {
+    try {
+        const serverTime = Date.now();
+        const response = await fetch('https://worldtimeapi.org/api/timezone/Asia/Kolkata');
+        const data = await response.json();
+        const actualTime = new Date(data.datetime).getTime();
+        timeOffset = actualTime - serverTime;
+        
+        const offsetSeconds = Math.round(timeOffset / 1000);
+        console.log(`⏰ IST time synced. Offset: ${offsetSeconds}s (${offsetSeconds > 0 ? '+' : ''}${offsetSeconds})`);
+    } catch (error) {
+        console.log('⚠️ Time sync failed, using system timezone conversion');
+        timeOffset = 0; // Fallback to system time
+    }
+}
+
 // Helper function to get current IST time
 function getISTTime() {
-    return new Date();
+    return new Date(Date.now() + timeOffset);
 }
 
 // Helper function to format IST time
@@ -2021,6 +2040,12 @@ client.on(Events.Error, error => {
 process.on('unhandledRejection', error => {
     console.error('Unhandled promise rejection:', error);
 });
+
+// Sync time on startup and every 6 hours
+(async () => {
+    await syncTime(); // Initial sync
+    setInterval(syncTime, 6 * 60 * 60 * 1000); // Sync every 6 hours
+})();
 
 // Login to Discord
 console.log('🔐 Attempting to login to Discord...');
