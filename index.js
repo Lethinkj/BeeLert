@@ -697,14 +697,8 @@ client.once(Events.ClientReady, async (c) => {
     // Schedule personal reminder checker (runs every minute)
     cron.schedule('* * * * *', async () => {
         const now = getISTTime();
-        // Convert to IST time string (H:MM format)
-        const istTimeString = now.toLocaleTimeString('en-US', {
-            timeZone: 'Asia/Kolkata',
-            hour: 'numeric',
-            minute: '2-digit',
-            hour12: false
-        });
-        const currentTime = istTimeString.replace(/^(\d+):(\d+):\d+$/, '$1:$2'); // Remove seconds
+        // Since getISTTime() already returns IST-adjusted time, use direct methods
+        const currentTime = `${now.getHours()}:${now.getMinutes().toString().padStart(2, '0')}`;
         
         // Debug log every minute (comment out after testing)
         if (userReminders.size > 0) {
