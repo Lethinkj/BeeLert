@@ -171,27 +171,35 @@ app.listen(PORT, () => {
 });
 
 // Time synchronization with World Time API
-let timeOffset = 0; // Offset between server time and actual IST
+let timeOffset = null; // null = not synced, number = offset in ms
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000; // IST is UTC+5:30
 
 async function syncTime() {
     try {
         const serverTime = Date.now();
         const response = await fetch('https://worldtimeapi.org/api/timezone/Asia/Kolkata');
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await response.json();
         const actualTime = new Date(data.datetime).getTime();
         timeOffset = actualTime - serverTime;
         
         const offsetSeconds = Math.round(timeOffset / 1000);
-        console.log(`⏰ IST time synced. Offset: ${offsetSeconds}s (${offsetSeconds > 0 ? '+' : ''}${offsetSeconds})`);
+        console.log(`⏰ IST time synced via API. Offset: ${offsetSeconds}s`);
     } catch (error) {
-        console.log('⚠️ Time sync failed, using system timezone conversion');
-        timeOffset = 0; // Fallback to system time
+        console.log(`⚠️ Time sync failed (${error.message}), using UTC+5:30 calculation`);
+        timeOffset = null; // Use fallback calculation
     }
 }
 
 // Helper function to get current IST time
 function getISTTime() {
-    return new Date(Date.now() + timeOffset);
+    if (timeOffset !== null) {
+        // Use synced offset
+        return new Date(Date.now() + timeOffset);
+    } else {
+        // Fallback: Calculate IST from UTC (UTC + 5:30)
+        return new Date(Date.now() + IST_OFFSET_MS);
+    }
 }
 
 // Helper function to format IST time
