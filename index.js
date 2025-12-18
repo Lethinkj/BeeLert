@@ -554,8 +554,12 @@ async function postMeetingManager(channel) {
         .addComponents(
             new ButtonBuilder()
                 .setCustomId('schedule_meeting')
-                .setLabel('📅 Schedule Meeting')
+                .setLabel('� Use Form')
                 .setStyle(ButtonStyle.Primary),
+            new ButtonBuilder()
+                .setCustomId('start_wizard')
+                .setLabel('💬 Step-by-Step')
+                .setStyle(ButtonStyle.Success),
             new ButtonBuilder()
                 .setCustomId('view_meetings')
                 .setLabel('📋 View Meetings')
@@ -563,11 +567,11 @@ async function postMeetingManager(channel) {
         );
 
     await channel.send({
-        content: '📅 **MEETING MANAGER**\n\n' +
-                 'Manage your team meetings easily!\n\n' +
-                 '• Click **Schedule Meeting** to create a new meeting\n' +
-                 '• Click **View Meetings** to see upcoming meetings\n' +
-                 '• Only meeting creators can cancel their meetings',
+        content: '📅 **MEETING SCHEDULER**\n\n' +
+                 '**Two ways to schedule:**\n\n' +
+                 '📝 **Use Form** - Quick modal form (fill all at once)\n' +
+                 '💬 **Step-by-Step** - Guided chat wizard (one question at a time)\n\n' +
+                 '📋 **View Meetings** - See all upcoming meetings',
         components: [row]
     });
 }
@@ -1196,6 +1200,59 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 );
                 
                 await interaction.showModal(modal);
+                return;
+            }
+            
+            // Start Wizard button - starts the step-by-step chat wizard
+            if (interaction.customId === 'start_wizard') {
+                const userId = interaction.user.id;
+                
+                // Check if user already has an active session
+                if (meetingWizardSessions.has(userId)) {
+                    return interaction.reply({
+                        content: '⚠️ You already have an active scheduling session. Complete it or type `cancel` to start over.',
+                        flags: MessageFlags.Ephemeral
+                    });
+                }
+                
+                // Initialize new session
+                const session = {
+                    step: 'title',
+                    title: null,
+                    date: null,
+                    startTime: null,
+                    endTime: null,
+                    channelNum: null,
+                    messages: [],
+                    lastActivity: Date.now()
+                };
+                meetingWizardSessions.set(userId, session);
+                
+                // Auto-timeout cleanup
+                setTimeout(() => {
+                    const currentSession = meetingWizardSessions.get(userId);
+                    if (currentSession && Date.now() - currentSession.lastActivity >= WIZARD_TIMEOUT) {
+                        for (const msg of currentSession.messages) {
+                            try { msg.delete(); } catch (e) {}
+                        }
+                        meetingWizardSessions.delete(userId);
+                    }
+                }, WIZARD_TIMEOUT + 1000);
+                
+                // Send first prompt
+                const promptMsg = await interaction.channel.send(
+                    `📅 **Meeting Scheduler** - Step 1/4\n\n` +
+                    `Hey <@${userId}>! Let's schedule your meeting.\n\n` +
+                    `📝 **What's the meeting title/topic?**\n` +
+                    `_(e.g., "Team Standup", "Project Review")_\n\n` +
+                    `_Type \`cancel\` to exit_`
+                );
+                session.messages.push(promptMsg);
+                
+                await interaction.reply({
+                    content: '✅ Wizard started! Answer the questions in the channel.',
+                    flags: MessageFlags.Ephemeral
+                });
                 return;
             }
             
