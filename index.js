@@ -99,6 +99,158 @@ const userReminders = new Map(); // userId -> { time: '20:00', customMessage: nu
 const conversationStates = new Map(); // userId -> { step: 'awaiting_time' | 'awaiting_message', time: string }
 const userHasChatted = new Set(); // Track users who have already chatted (for first-time AI context)
 
+// ============================================
+// CONVERSATION MEMORY SYSTEM
+// ============================================
+const conversationHistory = new Map(); // contextId -> [{role, content, timestamp}]
+const MAX_HISTORY_LENGTH = 10; // Store last 10 messages
+const HISTORY_EXPIRY = 2 * 60 * 60 * 1000; // 2 hours in milliseconds
+
+/**
+ * Add message to conversation history
+ * @param {string} contextId - userId for DMs, channelId for channels
+ * @param {string} role - 'user' or 'assistant'
+ * @param {string} content - Message content
+ */
+function addToHistory(contextId, role, content) {
+    if (!conversationHistory.has(contextId)) {
+        conversationHistory.set(contextId, []);
+    }
+    
+    const history = conversationHistory.get(contextId);
+    history.push({
+        role: role,
+        content: content,
+        timestamp: Date.now()
+    });
+    
+    // Keep only recent messages
+    if (history.length > MAX_HISTORY_LENGTH) {
+        history.shift(); // Remove oldest
+    }
+    
+    conversationHistory.set(contextId, history);
+}
+
+/**
+ * Get conversation history for context
+ * @param {string} contextId - userId for DMs, channelId for channels
+ * @returns {Array} Recent conversation messages
+ */
+function getHistory(contextId) {
+    const history = conversationHistory.get(contextId) || [];
+    const now = Date.now();
+    
+    // Filter out expired messages
+    const validHistory = history.filter(msg => (now - msg.timestamp) < HISTORY_EXPIRY);
+    
+    // Update storage with filtered history
+    if (validHistory.length !== history.length) {
+        conversationHistory.set(contextId, validHistory);
+    }
+    
+    return validHistory;
+}
+
+/**
+ * Clear conversation history
+ * @param {string} contextId - userId for DMs, channelId for channels
+ */
+function clearHistory(contextId) {
+    conversationHistory.delete(contextId);
+}
+
+/**
+ * Parse natural language for reminder requests
+ * @param {string} text - User's message
+ * @returns {Object} - { isReminderRequest, time, hours, minutes, display12hr, customMessage }
+ */
+function parseNaturalLanguageReminder(text) {
+    const lowerText = text.toLowerCase();
+    
+    // Check for reminder-related keywords
+    const reminderKeywords = [
+        'remind me', 'set reminder', 'set a reminder', 'daily reminder',
+        'reminder at', 'remind at', 'remind me at', 'set my reminder',
+        'create reminder', 'schedule reminder', 'want a reminder',
+        'need a reminder', 'can you remind', 'please remind',
+        'reminder for', 'remind me to', 'remind me every day',
+        'remind me daily', 'set up reminder', 'setup reminder'
+    ];
+    
+    const isReminderRequest = reminderKeywords.some(keyword => lowerText.includes(keyword));
+    
+    if (!isReminderRequest) {
+        return { isReminderRequest: false };
+    }
+    
+    // Try to extract time from the message
+    // Patterns: "9 PM", "9:00 PM", "21:00", "9pm", "at 9", "for 9 PM"
+    const timePatterns = [
+        /(?:at|for|around|@)\s*(\d{1,2}):?(\d{2})?\s*(am|pm|AM|PM)/i,
+        /(\d{1,2}):(\d{2})\s*(am|pm|AM|PM)/i,
+        /(\d{1,2})\s*(am|pm|AM|PM)/i,
+        /(\d{1,2}):(\d{2})(?!\s*(?:am|pm))/i, // 24-hour format like 21:00
+    ];
+    
+    let hours = null;
+    let minutes = 0;
+    let period = null;
+    
+    for (const pattern of timePatterns) {
+        const match = text.match(pattern);
+        if (match) {
+            hours = parseInt(match[1]);
+            minutes = match[2] ? parseInt(match[2]) : 0;
+            period = match[3]?.toUpperCase() || null;
+            break;
+        }
+    }
+    
+    // If no time found, return that it's a reminder request but no time
+    if (hours === null) {
+        return { isReminderRequest: true, time: null };
+    }
+    
+    // Validate
+    if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) {
+        return { isReminderRequest: true, time: null };
+    }
+    
+    // Convert to 24-hour format
+    if (period === 'PM' && hours !== 12) hours += 12;
+    if (period === 'AM' && hours === 12) hours = 0;
+    
+    // Create display format
+    const displayHour = hours > 12 ? hours - 12 : hours === 0 ? 12 : hours;
+    const displayPeriod = hours >= 12 ? 'PM' : 'AM';
+    const display12hr = `${displayHour}:${minutes.toString().padStart(2, '0')} ${displayPeriod}`;
+    
+    // Try to extract custom message (text after "to" or "with message")
+    let customMessage = null;
+    const messagePatterns = [
+        /(?:to|for)\s+(?:post|share|update|submit|do|complete|finish)\s+(.+?)(?:\s+at\s+\d|$)/i,
+        /(?:with message|message:?|saying)\s*[:\s]?\s*["']?(.+?)["']?$/i,
+    ];
+    
+    for (const pattern of messagePatterns) {
+        const match = text.match(pattern);
+        if (match && match[1] && match[1].length > 3) {
+            customMessage = match[1].trim();
+            break;
+        }
+    }
+    
+    return {
+        isReminderRequest: true,
+        time: true,
+        hours,
+        minutes,
+        display12hr,
+        customMessage
+    };
+}
+
 // Get AI-generated motivational content
 async function getAIMotivation() {
     try {
@@ -1222,9 +1374,8 @@ client.on(Events.MessageCreate, async (message) => {
                 await message.reply(
                     "🤖 **BeeLert Bot Help**\n\n" +
                     "**Setup Daily Reminder:**\n" +
-                    "• Type `!reminder` to start setup\n" +
-                    "• I'll guide you through choosing your time\n" +
-                    "• Optionally set a custom message\n\n" +
+                    "• Say `remind me at 9 PM` (natural language!)\n" +
+                    "• Or type `!reminder` for guided setup\n\n" +
                     "**Manage Your Reminder:**\n" +
                     "• `!status` - View your current settings\n" +
                     "• `!pause` - Temporarily pause reminders\n" +
@@ -1232,13 +1383,23 @@ client.on(Events.MessageCreate, async (message) => {
                     "• `!change time` - Update reminder time\n" +
                     "• `!change message` - Update custom message\n" +
                     "• `!stop` - Delete your reminder completely\n\n" +
-                    "**During Setup:**\n" +
-                    "• `cancel` - Cancel current setup\n\n" +
                     "**Chat with AI:**\n" +
                     "• Just send any message and I'll respond!\n" +
-                    "• Ask questions, get motivation, or chat casually\n\n" +
+                    "• 🧠 I remember our last 10 messages (2 hours)\n" +
+                    "• `!clear` - Clear conversation history\n\n" +
+                    "**Examples:**\n" +
+                    "• `remind me at 8:30 PM`\n" +
+                    "• `set a reminder for 9 AM`\n" +
+                    "• `daily reminder at 21:00`\n\n" +
                     "⚠️ Note: Reminders reset on bot restart (hosting limitation)"
                 );
+                return;
+            }
+            
+            // Clear conversation history command
+            if (content === '!clear') {
+                clearHistory(userId);
+                await message.reply("🗑️ Conversation history cleared! Starting fresh.");
                 return;
             }
             
@@ -1255,29 +1416,81 @@ client.on(Events.MessageCreate, async (message) => {
             }
             
             // If NOT in conversation state and NOT a command - use AI
-            if (!state && !['!help', '!status', '!pause', '!resume', '!change time', '!change message', '!stop', '!reminder'].includes(content)) {
+            if (!state && !['!help', '!status', '!pause', '!resume', '!change time', '!change message', '!stop', '!reminder', '!clear'].includes(content)) {
                 try {
                     await message.channel.sendTyping();
                     
-                    // Check if this is first time user is chatting
-                    const isFirstChat = !userHasChatted.has(userId);
-                    if (isFirstChat) {
-                        userHasChatted.add(userId); // Mark as chatted
+                    // Check for natural language reminder request
+                    const reminderResult = parseNaturalLanguageReminder(message.content);
+                    
+                    if (reminderResult.isReminderRequest && reminderResult.time) {
+                        // User asked to set a reminder with a time - set it directly
+                        const { hours, minutes, display12hr } = reminderResult;
+                        const timeString = `${hours}:${minutes.toString().padStart(2, '0')}`;
+                        
+                        // Check if they also specified a custom message
+                        const customMessage = reminderResult.customMessage || null;
+                        
+                        // Save reminder
+                        userReminders.set(userId, {
+                            time: timeString,
+                            customMessage: customMessage,
+                            active: true
+                        });
+                        
+                        console.log(`⏰ Natural language reminder set for ${message.author.username} at ${timeString} IST`);
+                        
+                        // Add to history
+                        addToHistory(userId, 'user', message.content);
+                        
+                        const responseMsg = customMessage 
+                            ? `✅ Done! I've set your daily reminder for **${display12hr} IST**.\n\n` +
+                              `📝 Custom message: "${customMessage}"\n\n` +
+                              `I'll DM you every day at this time! Use \`!status\` to check or \`!stop\` to cancel.`
+                            : `✅ Done! I've set your daily reminder for **${display12hr} IST**.\n\n` +
+                              `I'll DM you every day to post your progress! Use \`!status\` to check or \`!stop\` to cancel.`;
+                        
+                        addToHistory(userId, 'assistant', responseMsg);
+                        await message.reply(responseMsg);
+                        return;
                     }
                     
-                    const contextPrompt = isFirstChat 
-                        ? `You are BeeLert, a friendly Discord productivity bot. This is the user's FIRST chat with you.\n\n` +
-                          `IMPORTANT: Mention once that they can type !reminder to set up daily reminders (you'll ask for time like "9:00 PM", then optional custom message).\n\n` +
-                          `FEATURES: Daily reminders, Meeting scheduling, AI chat, Voice tracking\n` +
-                          `COMMANDS: !reminder, !help, !status, !pause, !resume, !stop\n\n` +
-                          `USER SAYS: "${message.content}"\n\n` +
-                          `Respond naturally, mention the !reminder feature briefly, keep under 100 words.`
-                        : `You are BeeLert, a friendly Discord productivity bot assistant.\n\n` +
-                          `USER SAYS: "${message.content}"\n\n` +
-                          `Respond naturally and helpfully. Don't repeat reminder setup instructions unless they specifically ask about reminders. ` +
-                          `Be conversational, friendly, and concise (under 80 words).`;
+                    if (reminderResult.isReminderRequest && !reminderResult.time) {
+                        // User wants a reminder but didn't specify time - ask for it
+                        conversationStates.set(userId, { step: 'awaiting_time', fromNaturalLanguage: true });
+                        
+                        addToHistory(userId, 'user', message.content);
+                        const askTimeMsg = "Sure! I'd love to set up a daily reminder for you. 📝\n\n" +
+                            "What time works best?\n" +
+                            "**Examples:** `8:00 PM`, `9 PM`, `21:00`, `8:30 AM`\n\n" +
+                            "_(Or type `cancel` to stop)_";
+                        addToHistory(userId, 'assistant', askTimeMsg);
+                        
+                        await message.reply(askTimeMsg);
+                        return;
+                    }
                     
-                    const aiResponse = await aiService.askQuestion(contextPrompt);
+                    // Regular AI chat - no reminder intent detected
+                    // Get conversation history for this user
+                    const history = getHistory(userId);
+                    const isFirstChat = history.length === 0;
+                    
+                    const systemPrompt = isFirstChat 
+                        ? `You are BeeLert, a friendly Discord productivity bot. This is the user's FIRST chat with you.\n\n` +
+                          `IMPORTANT: Mention once that they can say "remind me at 9 PM" or type !reminder to set up daily reminders.\n\n` +
+                          `FEATURES: Daily reminders (natural language or !reminder), Meeting scheduling, AI chat with memory, Voice tracking\n` +
+                          `COMMANDS: !reminder, !help, !status, !clear\n\n` +
+                          `Respond naturally, mention the reminder feature briefly, keep under 100 words.`
+                        : `You are BeeLert, a friendly Discord productivity bot assistant. You remember our conversation. Respond naturally and helpfully. Be conversational and concise (under 80 words).`;
+                    
+                    // Add user message to history BEFORE getting response
+                    addToHistory(userId, 'user', message.content);
+                    
+                    // Get AI response with conversation context
+                    const aiResponse = await aiService.askWithHistory(message.content, history, systemPrompt);
+                    
+                    // Add AI response to history
+                    addToHistory(userId, 'assistant', aiResponse);
                     
                     await message.reply(
                         aiResponse || 
@@ -1498,7 +1711,21 @@ client.on(Events.MessageCreate, async (message) => {
     if (message.channel.id === GEMINI_CHANNEL_ID && !message.content.startsWith('!')) {
         try {
             await message.channel.sendTyping();
-            const response = await askGemini(message.content);
+            
+            // Use channel ID for shared conversation context
+            const contextId = `channel_${message.channel.id}`;
+            const history = getHistory(contextId);
+            
+            const systemPrompt = `You are BeeLert, a helpful AI assistant in a Discord server. You have conversation memory and can reference previous messages. Answer questions naturally and helpfully. Keep responses concise (under 150 words).`;
+            
+            // Add user message to history (include username for context)
+            addToHistory(contextId, 'user', `${message.author.username}: ${message.content}`);
+            
+            // Get AI response with conversation context
+            const response = await aiService.askWithHistory(message.content, history, systemPrompt);
+            
+            // Add AI response to history
+            addToHistory(contextId, 'assistant', response);
             
             // Split long responses
             if (response.length > 2000) {
@@ -1516,6 +1743,60 @@ client.on(Events.MessageCreate, async (message) => {
             scheduleMessageDeletion(message);
         } catch (error) {
             console.error('Error in Gemini chat:', error);
+            await message.reply('Sorry, I had trouble processing that. Please try again!');
+        }
+        return;
+    }
+
+    // Handle @mentions of the bot in any channel
+    if (message.mentions.has(client.user) && !message.author.bot) {
+        try {
+            await message.channel.sendTyping();
+            
+            // Remove the bot mention from the message to get the actual question
+            const userQuestion = message.content
+                .replace(new RegExp(`<@!?${client.user.id}>`, 'g'), '')
+                .trim();
+            
+            // If empty message (just a mention), respond with intro
+            if (!userQuestion) {
+                await message.reply(
+                    "👋 Hey! I'm **BeeLert**, your productivity assistant!\n\n" +
+                    "You can:\n" +
+                    "• Ask me anything by mentioning me\n" +
+                    "• DM me for personal reminders\n" +
+                    "• Chat in <#" + GEMINI_CHANNEL_ID + "> for AI conversations\n\n" +
+                    "Try: `@BeeLert what's the weather like?`"
+                );
+                return;
+            }
+            
+            // Use channel-specific context for memory
+            const contextId = `mention_${message.channel.id}`;
+            const history = getHistory(contextId);
+            
+            const systemPrompt = `You are BeeLert, a helpful AI assistant in a Discord server. A user mentioned you with a question. Answer helpfully and concisely (under 150 words). Be friendly and conversational.`;
+            
+            // Add user message to history
+            addToHistory(contextId, 'user', `${message.author.username}: ${userQuestion}`);
+            
+            // Get AI response with conversation context
+            const response = await aiService.askWithHistory(userQuestion, history, systemPrompt);
+            
+            // Add AI response to history
+            addToHistory(contextId, 'assistant', response);
+            
+            // Split long responses
+            if (response.length > 2000) {
+                const chunks = response.match(/[\s\S]{1,2000}/g);
+                for (const chunk of chunks) {
+                    await message.reply(chunk);
+                }
+            } else {
+                await message.reply(response);
+            }
+        } catch (error) {
+            console.error('Error handling bot mention:', error);
             await message.reply('Sorry, I had trouble processing that. Please try again!');
         }
         return;

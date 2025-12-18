@@ -1,57 +1,48 @@
-const OpenAI = require('openai');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 
-// Initialize OpenAI
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-let openai;
+// Initialize Gemini
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+let genAI;
+let model;
 
-if (OPENAI_API_KEY && OPENAI_API_KEY !== 'YOUR_OPENAI_API_KEY_HERE') {
+if (GEMINI_API_KEY) {
     try {
-        openai = new OpenAI({
-            apiKey: OPENAI_API_KEY,
-            baseURL: 'https://openrouter.ai/api/v1'
-        });
-        console.log('✅ OpenRouter service initialized successfully (GPT-4o-mini via OpenRouter)');
+        genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+        model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+        console.log('✅ Gemini AI service initialized successfully (Gemini 2.5 Flash)');
     } catch (error) {
-        console.error('❌ Error initializing OpenAI:', error);
-        console.error('⚠️  API KEY ERROR');
-        console.error('📝 Get a new API key from: https://openrouter.ai/keys');
-        console.error('🔧 Update OPENAI_API_KEY in .env file');
-        console.error('🔄 Restart the bot');
-        openai = null;
+        console.error('❌ Error initializing Gemini:', error);
+        genAI = null;
+        model = null;
     }
 } else {
-    console.log('⚠️  Warning: OpenAI API key not configured. AI features will be disabled.');
-    openai = null;
+    console.log('⚠️  Warning: Gemini API key not configured. AI features will be disabled.');
+    genAI = null;
+    model = null;
 }
 
 /**
- * Ask OpenAI GPT a question
+ * Ask Gemini a question (simple, no history)
  * @param {string} question - The question to ask
  * @returns {Promise<string>} - The AI's response
  */
 async function askQuestion(question) {
-    if (!openai) {
-        return "❌ AI features are not configured. Please check your OpenAI API key.\n\n**To fix:**\n1. Get a new API key from https://platform.openai.com/api-keys\n2. Update OPENAI_API_KEY in your .env file\n3. Restart the bot";
+    if (!model) {
+        return "❌ AI features are not configured. Please check your Gemini API key.";
     }
     
     try {
-        const completion = await openai.chat.completions.create({
-            model: "gpt-4o-mini",
-            messages: [
-                { role: "user", content: question }
-            ],
-            max_tokens: 500
-        });
-        
-        return completion.choices[0].message.content;
+        const result = await model.generateContent(question);
+        const response = await result.response;
+        return response.text();
     } catch (error) {
-        console.error('❌ Error asking OpenAI:', error.message);
+        console.error('❌ Error asking Gemini:', error.message);
         
-        if (error.message.includes('401') || error.message.includes('invalid')) {
-            return "❌ **OpenAI API Error**: The API key is invalid.\n\n**To fix:**\n1. Generate a new API key at: https://platform.openai.com/api-keys\n2. Update `OPENAI_API_KEY` in your `.env` file\n3. Restart the bot";
+        if (error.message.includes('API_KEY') || error.message.includes('401')) {
+            return "❌ **Gemini API Error**: The API key is invalid.\n\n**To fix:**\n1. Get a new API key from Google AI Studio\n2. Update `GEMINI_API_KEY` in your `.env` file\n3. Restart the bot";
         }
         
-        return "Sorry, I encountered an error processing your question. The AI service might be temporarily unavailable. Please try again later.";
+        return "Sorry, I encountered an error processing your question. Please try again later.";
     }
 }
 
@@ -60,25 +51,65 @@ async function askQuestion(question) {
  * @returns {Promise<string>} - Motivational message
  */
 async function generateMotivation() {
-    if (!openai) {
+    if (!model) {
         return null; // Return null to use fallback quotes
     }
     
     try {
         const prompt = `Generate a short, inspiring motivational message (2-3 sentences max) about consistent learning, daily progress, and self-improvement. Make it encouraging and actionable. Include an emoji. Keep it under 150 characters.`;
         
-        const completion = await openai.chat.completions.create({
-            model: "gpt-4o-mini",
-            messages: [
-                { role: "user", content: prompt }
-            ],
-            max_tokens: 100
-        });
-        
-        return completion.choices[0].message.content.trim();
+        const result = await model.generateContent(prompt);
+        const response = await result.response;
+        return response.text().trim();
     } catch (error) {
         console.error('❌ Error generating AI motivation:', error.message);
         return null; // Return null to use fallback quotes
+    }
+}
+
+/**
+ * Ask Gemini with conversation history for context-aware responses
+ * @param {string} question - Current user question
+ * @param {Array} history - Previous conversation messages [{role, content}]
+ * @param {string} systemPrompt - Optional system context
+ * @returns {Promise<string>} - AI response
+ */
+async function askWithHistory(question, history = [], systemPrompt = '') {
+    if (!model) {
+        return "❌ AI features are not configured. Please check your Gemini API key.";
+    }
+    
+    try {
+        // Build conversation history for Gemini format
+        const chatHistory = [];
+        
+        // Convert history to Gemini format
+        for (const msg of history) {
+            chatHistory.push({
+                role: msg.role === 'assistant' ? 'model' : 'user',
+                parts: [{ text: msg.content }]
+            });
+        }
+        
+        // Start chat with history
+        const chat = model.startChat({
+            history: chatHistory,
+            generationConfig: {
+                maxOutputTokens: 500,
+            },
+        });
+        
+        // Build the prompt with system context
+        const fullPrompt = systemPrompt 
+            ? `${systemPrompt}\n\nUser message: ${question}`
+            : question;
+        
+        const result = await chat.sendMessage(fullPrompt);
+        const response = await result.response;
+        return response.text();
+    } catch (error) {
+        console.error('❌ Error in Gemini with history:', error.message);
+        return "Sorry, I encountered an error processing your question. Please try again.";
     }
 }
 
@@ -89,25 +120,18 @@ async function generateMotivation() {
  * @returns {Promise<string>} - AI response with context
  */
 async function askWithContext(question, context = '') {
-    if (!openai) {
+    if (!model) {
         return "AI features are not available.";
     }
     
     try {
-        const messages = context 
-            ? [
-                { role: "system", content: context },
-                { role: "user", content: question }
-            ]
-            : [{ role: "user", content: question }];
+        const fullPrompt = context 
+            ? `${context}\n\nQuestion: ${question}`
+            : question;
         
-        const completion = await openai.chat.completions.create({
-            model: "gpt-4o-mini",
-            messages: messages,
-            max_tokens: 500
-        });
-        
-        return completion.choices[0].message.content;
+        const result = await model.generateContent(fullPrompt);
+        const response = await result.response;
+        return response.text();
     } catch (error) {
         console.error('❌ Error in contextual AI query:', error.message);
         return "Sorry, I encountered an error. Please try again.";
@@ -119,12 +143,13 @@ async function askWithContext(question, context = '') {
  * @returns {boolean} - True if AI is configured and ready
  */
 function isAIAvailable() {
-    return openai !== null;
+    return model !== null;
 }
 
 module.exports = {
     askQuestion,
     generateMotivation,
     askWithContext,
+    askWithHistory,
     isAIAvailable
 };
