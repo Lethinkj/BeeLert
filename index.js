@@ -99,6 +99,10 @@ const userReminders = new Map(); // userId -> { time: '20:00', customMessage: nu
 const conversationStates = new Map(); // userId -> { step: 'awaiting_time' | 'awaiting_message', time: string }
 const userHasChatted = new Set(); // Track users who have already chatted (for first-time AI context)
 
+// Meeting scheduling wizard sessions
+const meetingWizardSessions = new Map(); // userId -> { step, title, date, startTime, endTime, channelNum, messages[], lastActivity }
+const WIZARD_TIMEOUT = 2 * 60 * 1000; // 2 minutes timeout for wizard sessions
+
 // ============================================
 // CONVERSATION MEMORY SYSTEM
 // ============================================
@@ -1908,221 +1912,336 @@ client.on(Events.MessageCreate, async (message) => {
     }
 
     // Server message handler starts here
-    // Natural language meeting scheduling in schedule-meet channel
+    // Interactive meeting scheduling wizard in schedule-meet channel
     if (message.channel.id === SCHEDULE_MEET_CHANNEL_ID && !message.content.startsWith('!')) {
-        const meetingResult = parseNaturalLanguageMeeting(message.content);
+        const userId = message.author.id;
+        const content = message.content.trim().toLowerCase();
         
-        if (meetingResult.isMeetingRequest) {
+        // Check if user has an active wizard session
+        let session = meetingWizardSessions.get(userId);
+        
+        // Check for cancel command
+        if (content === 'cancel' || content === 'stop' || content === 'exit') {
+            if (session) {
+                // Delete all session messages
+                for (const msg of session.messages) {
+                    try { await msg.delete(); } catch (e) {}
+                }
+                try { await message.delete(); } catch (e) {}
+                meetingWizardSessions.delete(userId);
+                const cancelMsg = await message.channel.send(`❌ Meeting scheduling cancelled, <@${userId}>.`);
+                setTimeout(() => cancelMsg.delete().catch(() => {}), 5000);
+            }
+            return;
+        }
+        
+        // Start new wizard session
+        const startKeywords = ['schedule', 'meeting', 'meet', 'create', 'new', 'book', 'plan'];
+        const isStartCommand = startKeywords.some(kw => content.includes(kw)) || !session;
+        
+        if (!session && (isStartCommand || content.length > 0)) {
+            // Initialize new session
+            session = {
+                step: 'title',
+                title: null,
+                date: null,
+                startTime: null,
+                endTime: null,
+                channelNum: null,
+                messages: [message],
+                lastActivity: Date.now()
+            };
+            meetingWizardSessions.set(userId, session);
+            
+            // Auto-timeout cleanup
+            setTimeout(() => {
+                const currentSession = meetingWizardSessions.get(userId);
+                if (currentSession && Date.now() - currentSession.lastActivity >= WIZARD_TIMEOUT) {
+                    for (const msg of currentSession.messages) {
+                        try { msg.delete(); } catch (e) {}
+                    }
+                    meetingWizardSessions.delete(userId);
+                }
+            }, WIZARD_TIMEOUT + 1000);
+            
+            const promptMsg = await message.channel.send(
+                `📅 **Meeting Scheduler** - Step 1/4\n\n` +
+                `Hey <@${userId}>! Let's schedule your meeting.\n\n` +
+                `📝 **What's the meeting title/topic?**\n` +
+                `_(e.g., "Team Standup", "Project Review")_\n\n` +
+                `_Type \`cancel\` to exit_`
+            );
+            session.messages.push(promptMsg);
+            return;
+        }
+        
+        if (session) {
+            session.lastActivity = Date.now();
+            session.messages.push(message);
+            
             try {
-                await message.channel.sendTyping();
-                
-                // Collect messages to delete later
-                const messagesToDelete = [message];
-                
-                // Check what info is missing
-                if (!meetingResult.hasTopic || !meetingResult.hasTime) {
-                    // Use AI to help extract or ask for missing info
-                    const aiPrompt = `Extract meeting details from: "${message.content}"
+                // Process based on current step
+                if (session.step === 'title') {
+                    session.title = message.content.trim();
+                    session.step = 'date';
                     
-Return ONLY a JSON object (no markdown, no explanation):
-{
-  "topic": "meeting topic or null",
-  "date": "today/tomorrow/DD/MM or null",
-  "startTime": "HH:MM AM/PM or null",
-  "endTime": "HH:MM AM/PM or null",
-  "channel": "channel number 1-4 or null"
-}`;
-                    
-                    const aiResponse = await aiService.askQuestion(aiPrompt);
-                    
-                    try {
-                        // Try to parse AI response
-                        const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);
-                        if (jsonMatch) {
-                            const parsed = JSON.parse(jsonMatch[0]);
-                            if (parsed.topic && !meetingResult.topic) meetingResult.topic = parsed.topic;
-                            if (parsed.startTime && !meetingResult.hasTime) {
-                                const timeMatch = parsed.startTime.match(/(\d{1,2}):?(\d{2})?\s*(am|pm)/i);
-                                if (timeMatch) {
-                                    meetingResult.startHours = parseInt(timeMatch[1]);
-                                    meetingResult.startMinutes = timeMatch[2] ? parseInt(timeMatch[2]) : 0;
-                                    const period = timeMatch[3].toUpperCase();
-                                    if (period === 'PM' && meetingResult.startHours !== 12) meetingResult.startHours += 12;
-                                    if (period === 'AM' && meetingResult.startHours === 12) meetingResult.startHours = 0;
-                                    meetingResult.hasTime = true;
-                                }
-                            }
-                            if (parsed.endTime) {
-                                const endMatch = parsed.endTime.match(/(\d{1,2}):?(\d{2})?\s*(am|pm)/i);
-                                if (endMatch) {
-                                    meetingResult.endHours = parseInt(endMatch[1]);
-                                    meetingResult.endMinutes = endMatch[2] ? parseInt(endMatch[2]) : 0;
-                                    const period = endMatch[3].toUpperCase();
-                                    if (period === 'PM' && meetingResult.endHours !== 12) meetingResult.endHours += 12;
-                                    if (period === 'AM' && meetingResult.endHours === 12) meetingResult.endHours = 0;
-                                }
-                            }
-                            if (parsed.channel && !meetingResult.channelNum) {
-                                meetingResult.channelNum = parseInt(parsed.channel);
-                            }
-                        }
-                    } catch (parseErr) {
-                        // AI couldn't parse, continue with what we have
-                    }
-                }
-                
-                // Still missing critical info? Ask user
-                if (!meetingResult.topic || !meetingResult.hasTime) {
-                    let missingInfo = [];
-                    if (!meetingResult.topic) missingInfo.push('**topic** (e.g., "Project Discussion")');
-                    if (!meetingResult.hasTime) missingInfo.push('**time** (e.g., "8 PM to 10 PM")');
-                    
-                    const askMsg = await message.reply(
-                        `📝 I need a bit more info to schedule:\n` +
-                        `Missing: ${missingInfo.join(', ')}\n\n` +
-                        `**Try:** \`schedule meeting "Team Sync" tomorrow 8 PM to 9 PM in room 1\``
+                    const promptMsg = await message.channel.send(
+                        `📅 **Meeting Scheduler** - Step 2/4\n\n` +
+                        `Great! Topic: **${session.title}**\n\n` +
+                        `📆 **When is the meeting?**\n` +
+                        `• \`today\` - Today\n` +
+                        `• \`tomorrow\` - Tomorrow\n` +
+                        `• \`DD/MM\` - Specific date (e.g., 25/12)\n\n` +
+                        `_Type \`cancel\` to exit_`
                     );
-                    messagesToDelete.push(askMsg);
+                    session.messages.push(promptMsg);
                     
-                    // Delete after 30 seconds
-                    setTimeout(async () => {
-                        for (const msg of messagesToDelete) {
-                            try { await msg.delete(); } catch (e) {}
+                } else if (session.step === 'date') {
+                    const input = content;
+                    const nowIST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+                    
+                    if (input === 'today') {
+                        session.date = { day: nowIST.getDate(), month: nowIST.getMonth() + 1, year: nowIST.getFullYear() };
+                    } else if (input === 'tomorrow') {
+                        const tomorrow = new Date(nowIST);
+                        tomorrow.setDate(tomorrow.getDate() + 1);
+                        session.date = { day: tomorrow.getDate(), month: tomorrow.getMonth() + 1, year: tomorrow.getFullYear() };
+                    } else {
+                        const dateMatch = input.match(/(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/);
+                        if (dateMatch) {
+                            const day = parseInt(dateMatch[1]);
+                            const month = parseInt(dateMatch[2]);
+                            const year = dateMatch[3] ? (dateMatch[3].length === 2 ? 2000 + parseInt(dateMatch[3]) : parseInt(dateMatch[3])) : nowIST.getFullYear();
+                            if (day >= 1 && day <= 31 && month >= 1 && month <= 12) {
+                                session.date = { day, month, year };
+                            }
                         }
-                    }, 30000);
-                    return;
-                }
-                
-                // Set defaults
-                if (!meetingResult.channelNum) meetingResult.channelNum = 1; // Default to Lounge
-                if (!meetingResult.endHours) {
-                    meetingResult.endHours = meetingResult.startHours + 1;
-                    meetingResult.endMinutes = meetingResult.startMinutes;
-                    if (meetingResult.endHours >= 24) meetingResult.endHours -= 24;
-                }
-                
-                const channel = VOICE_CHANNELS[meetingResult.channelNum - 1] || VOICE_CHANNELS[0];
-                const targetDate = meetingResult.targetDate;
-                
-                // Create Date objects - these are in UTC internally but represent IST times
-                const startTime = new Date(`${targetDate.year}-${targetDate.month.toString().padStart(2, '0')}-${targetDate.day.toString().padStart(2, '0')}T${meetingResult.startHours.toString().padStart(2, '0')}:${meetingResult.startMinutes.toString().padStart(2, '0')}:00+05:30`);
-                const endTime = new Date(`${targetDate.year}-${targetDate.month.toString().padStart(2, '0')}-${targetDate.day.toString().padStart(2, '0')}T${meetingResult.endHours.toString().padStart(2, '0')}:${meetingResult.endMinutes.toString().padStart(2, '0')}:00+05:30`);
-                
-                // Debug log for timezone verification
-                console.log(`📅 NL Meeting Parse Debug:`);
-                console.log(`   Target Date: ${targetDate.day}/${targetDate.month}/${targetDate.year}`);
-                console.log(`   Start Time (24h): ${meetingResult.startHours}:${meetingResult.startMinutes}`);
-                console.log(`   End Time (24h): ${meetingResult.endHours}:${meetingResult.endMinutes}`);
-                console.log(`   Start UTC: ${startTime.toISOString()}`);
-                console.log(`   End UTC: ${endTime.toISOString()}`);
-                console.log(`   Current UTC: ${new Date().toISOString()}`);
-                
-                // Validate - compare UTC timestamps
-                if (startTime.getTime() <= Date.now()) {
-                    const errorMsg = await message.reply('❌ Start time must be in the future. Current IST: ' + new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }));
-                    messagesToDelete.push(errorMsg);
-                    setTimeout(async () => {
-                        for (const msg of messagesToDelete) {
-                            try { await msg.delete(); } catch (e) {}
-                        }
-                    }, 10000);
-                    return;
-                }
-                
-                if (endTime.getTime() <= startTime.getTime()) {
-                    const errorMsg = await message.reply('❌ End time must be after start time.');
-                    messagesToDelete.push(errorMsg);
-                    setTimeout(async () => {
-                        for (const msg of messagesToDelete) {
-                            try { await msg.delete(); } catch (e) {}
-                        }
-                    }, 10000);
-                    return;
-                }
-                
-                const meetingId = Date.now().toString();
-                
-                // Format display strings
-                const dateDispStr = startTime.toLocaleDateString('en-IN', {
-                    timeZone: 'Asia/Kolkata',
-                    weekday: 'long',
-                    year: 'numeric',
-                    month: 'long',
-                    day: 'numeric'
-                });
-                const startTimeDispStr = startTime.toLocaleTimeString('en-IN', {
-                    timeZone: 'Asia/Kolkata',
-                    hour: '2-digit',
-                    minute: '2-digit',
-                    hour12: true
-                });
-                const endTimeDispStr = endTime.toLocaleTimeString('en-IN', {
-                    timeZone: 'Asia/Kolkata',
-                    hour: '2-digit',
-                    minute: '2-digit',
-                    hour12: true
-                });
-                
-                // Calculate duration
-                const durationMs = endTime.getTime() - startTime.getTime();
-                const durationHours = Math.floor(durationMs / (1000 * 60 * 60));
-                const durationMinutes = Math.floor((durationMs % (1000 * 60 * 60)) / (1000 * 60));
-                const durationStr = `${durationHours}h ${durationMinutes}m`;
-                
-                // Create Discord Scheduled Event
-                const guild = message.guild;
-                const scheduledEvent = await guild.scheduledEvents.create({
-                    name: meetingResult.topic,
-                    scheduledStartTime: startTime,
-                    scheduledEndTime: endTime,
-                    privacyLevel: GuildScheduledEventPrivacyLevel.GuildOnly,
-                    entityType: GuildScheduledEventEntityType.Voice,
-                    channel: channel.id,
-                    description: `Scheduled by ${message.author.username} via natural language.`
-                });
-                
-                // Post confirmation to MEETING_SUMMARY_CHANNEL_ID
-                const summaryChannel = await client.channels.fetch(MEETING_SUMMARY_CHANNEL_ID);
-                const confirmationMsg = await summaryChannel.send({
-                    content: `✅ **Meeting Scheduled**\n\n` +
-                            `📝 **${meetingResult.topic}**\n` +
-                            `👤 Scheduled by: <@${message.author.id}>\n` +
-                            `📅 ${dateDispStr}\n` +
-                            `🕐 ${startTimeDispStr} - ${endTimeDispStr} IST (${durationStr})\n` +
-                            `📍 ${channel.name}\n\n` +
-                            `⏰ Attendance tracking will start automatically at meeting time.\n` +
-                            `📅 Discord event created!`
-                });
-                
-                // Store meeting
-                scheduledMeetings.set(meetingId, {
-                    startTime: startTime,
-                    endTime: endTime,
-                    topic: meetingResult.topic,
-                    channelId: channel.id,
-                    channelName: channel.name,
-                    creatorId: message.author.id,
-                    confirmationMsg: confirmationMsg,
-                    status: 'scheduled',
-                    eventId: scheduledEvent.id
-                });
-                
-                console.log(`📅 NL Meeting scheduled by ${message.author.username}: ${meetingResult.topic} at ${startTimeDispStr}`);
-                
-                // Send quick confirmation then delete
-                const quickConfirm = await message.reply(`✅ Meeting **"${meetingResult.topic}"** scheduled for ${startTimeDispStr}! Check <#${MEETING_SUMMARY_CHANNEL_ID}> for details.`);
-                messagesToDelete.push(quickConfirm);
-                
-                // Delete all scheduling messages after 5 seconds
-                setTimeout(async () => {
-                    for (const msg of messagesToDelete) {
-                        try { await msg.delete(); } catch (e) {}
                     }
-                }, 5000);
-                
+                    
+                    if (!session.date) {
+                        const errorMsg = await message.channel.send(`❌ Invalid date. Try: \`today\`, \`tomorrow\`, or \`DD/MM\` (e.g., 25/12)`);
+                        session.messages.push(errorMsg);
+                        return;
+                    }
+                    
+                    session.step = 'time';
+                    const dateStr = `${session.date.day}/${session.date.month}/${session.date.year}`;
+                    
+                    const promptMsg = await message.channel.send(
+                        `📅 **Meeting Scheduler** - Step 3/4\n\n` +
+                        `Topic: **${session.title}**\n` +
+                        `Date: **${dateStr}**\n\n` +
+                        `⏰ **What time? (IST)**\n` +
+                        `• \`8 PM\` or \`8:30 PM\` - Single time (1 hour meeting)\n` +
+                        `• \`8 PM - 10 PM\` - Time range\n` +
+                        `• \`20:00 - 22:00\` - 24-hour format\n\n` +
+                        `_Type \`cancel\` to exit_`
+                    );
+                    session.messages.push(promptMsg);
+                    
+                } else if (session.step === 'time') {
+                    // Parse time - support various formats
+                    const timeInput = message.content.trim();
+                    let startHours = null, startMinutes = 0, endHours = null, endMinutes = 0;
+                    
+                    // Try range: "8 PM - 10 PM" or "8PM-10PM" or "20:00 - 22:00"
+                    const rangeMatch = timeInput.match(/(\d{1,2}):?(\d{2})?\s*(am|pm)?\s*[-–to]+\s*(\d{1,2}):?(\d{2})?\s*(am|pm)?/i);
+                    if (rangeMatch) {
+                        startHours = parseInt(rangeMatch[1]);
+                        startMinutes = rangeMatch[2] ? parseInt(rangeMatch[2]) : 0;
+                        const startPeriod = rangeMatch[3]?.toUpperCase();
+                        endHours = parseInt(rangeMatch[4]);
+                        endMinutes = rangeMatch[5] ? parseInt(rangeMatch[5]) : 0;
+                        const endPeriod = rangeMatch[6]?.toUpperCase() || startPeriod;
+                        
+                        // Convert to 24-hour if AM/PM provided
+                        if (startPeriod === 'PM' && startHours !== 12) startHours += 12;
+                        if (startPeriod === 'AM' && startHours === 12) startHours = 0;
+                        if (endPeriod === 'PM' && endHours !== 12) endHours += 12;
+                        if (endPeriod === 'AM' && endHours === 12) endHours = 0;
+                    } else {
+                        // Single time: "8 PM" or "8:30 PM" or "20:00"
+                        const singleMatch = timeInput.match(/(\d{1,2}):?(\d{2})?\s*(am|pm)?/i);
+                        if (singleMatch) {
+                            startHours = parseInt(singleMatch[1]);
+                            startMinutes = singleMatch[2] ? parseInt(singleMatch[2]) : 0;
+                            const period = singleMatch[3]?.toUpperCase();
+                            
+                            if (period === 'PM' && startHours !== 12) startHours += 12;
+                            if (period === 'AM' && startHours === 12) startHours = 0;
+                            
+                            // Default 1 hour duration
+                            endHours = startHours + 1;
+                            endMinutes = startMinutes;
+                            if (endHours >= 24) endHours -= 24;
+                        }
+                    }
+                    
+                    if (startHours === null || startHours < 0 || startHours > 23) {
+                        const errorMsg = await message.channel.send(`❌ Invalid time. Try: \`8 PM\`, \`8 PM - 10 PM\`, or \`20:00 - 22:00\``);
+                        session.messages.push(errorMsg);
+                        return;
+                    }
+                    
+                    session.startTime = { hours: startHours, minutes: startMinutes };
+                    session.endTime = { hours: endHours, minutes: endMinutes };
+                    session.step = 'channel';
+                    
+                    const formatTime = (h, m) => {
+                        const period = h >= 12 ? 'PM' : 'AM';
+                        const h12 = h % 12 || 12;
+                        return `${h12}:${m.toString().padStart(2, '0')} ${period}`;
+                    };
+                    
+                    const promptMsg = await message.channel.send(
+                        `📅 **Meeting Scheduler** - Step 4/4\n\n` +
+                        `Topic: **${session.title}**\n` +
+                        `Date: **${session.date.day}/${session.date.month}/${session.date.year}**\n` +
+                        `Time: **${formatTime(startHours, startMinutes)} - ${formatTime(endHours, endMinutes)} IST**\n\n` +
+                        `📍 **Which voice channel?**\n` +
+                        `• \`1\` - 🌴 Lounge\n` +
+                        `• \`2\` - 💬 Aura 7F\n` +
+                        `• \`3\` - 📹 Meeting Room 1\n` +
+                        `• \`4\` - 📹 Meeting Room 2\n\n` +
+                        `_Type \`cancel\` to exit_`
+                    );
+                    session.messages.push(promptMsg);
+                    
+                } else if (session.step === 'channel') {
+                    const channelInput = content.trim();
+                    let channelNum = null;
+                    
+                    if (channelInput === '1' || channelInput.includes('lounge')) channelNum = 1;
+                    else if (channelInput === '2' || channelInput.includes('aura')) channelNum = 2;
+                    else if (channelInput === '3' || channelInput.includes('room 1')) channelNum = 3;
+                    else if (channelInput === '4' || channelInput.includes('room 2')) channelNum = 4;
+                    else {
+                        const numMatch = channelInput.match(/[1-4]/);
+                        if (numMatch) channelNum = parseInt(numMatch[0]);
+                    }
+                    
+                    if (!channelNum) {
+                        const errorMsg = await message.channel.send(`❌ Invalid channel. Enter a number from 1 to 4.`);
+                        session.messages.push(errorMsg);
+                        return;
+                    }
+                    
+                    session.channelNum = channelNum;
+                    
+                    // === CREATE THE MEETING ===
+                    const channel = VOICE_CHANNELS[channelNum - 1];
+                    const targetDate = session.date;
+                    
+                    const startTime = new Date(`${targetDate.year}-${targetDate.month.toString().padStart(2, '0')}-${targetDate.day.toString().padStart(2, '0')}T${session.startTime.hours.toString().padStart(2, '0')}:${session.startTime.minutes.toString().padStart(2, '0')}:00+05:30`);
+                    const endTime = new Date(`${targetDate.year}-${targetDate.month.toString().padStart(2, '0')}-${targetDate.day.toString().padStart(2, '0')}T${session.endTime.hours.toString().padStart(2, '0')}:${session.endTime.minutes.toString().padStart(2, '0')}:00+05:30`);
+                    
+                    // Validate
+                    if (startTime.getTime() <= Date.now()) {
+                        const errorMsg = await message.channel.send(`❌ Start time must be in the future.\nCurrent IST: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`);
+                        session.messages.push(errorMsg);
+                        session.step = 'time';
+                        return;
+                    }
+                    
+                    if (endTime.getTime() <= startTime.getTime()) {
+                        const errorMsg = await message.channel.send(`❌ End time must be after start time. Please re-enter time.`);
+                        session.messages.push(errorMsg);
+                        session.step = 'time';
+                        return;
+                    }
+                    
+                    const meetingId = Date.now().toString();
+                    
+                    // Format display strings
+                    const dateDispStr = startTime.toLocaleDateString('en-IN', {
+                        timeZone: 'Asia/Kolkata',
+                        weekday: 'long',
+                        year: 'numeric',
+                        month: 'long',
+                        day: 'numeric'
+                    });
+                    const startTimeDispStr = startTime.toLocaleTimeString('en-IN', {
+                        timeZone: 'Asia/Kolkata',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        hour12: true
+                    });
+                    const endTimeDispStr = endTime.toLocaleTimeString('en-IN', {
+                        timeZone: 'Asia/Kolkata',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        hour12: true
+                    });
+                    
+                    const durationMs = endTime.getTime() - startTime.getTime();
+                    const durationHours = Math.floor(durationMs / (1000 * 60 * 60));
+                    const durationMinutes = Math.floor((durationMs % (1000 * 60 * 60)) / (1000 * 60));
+                    const durationStr = durationHours > 0 ? `${durationHours}h ${durationMinutes}m` : `${durationMinutes}m`;
+                    
+                    // Create Discord Scheduled Event
+                    const guild = message.guild;
+                    const scheduledEvent = await guild.scheduledEvents.create({
+                        name: session.title,
+                        scheduledStartTime: startTime,
+                        scheduledEndTime: endTime,
+                        privacyLevel: GuildScheduledEventPrivacyLevel.GuildOnly,
+                        entityType: GuildScheduledEventEntityType.Voice,
+                        channel: channel.id,
+                        description: `Scheduled by ${message.author.username} via interactive wizard.`
+                    });
+                    
+                    // Post confirmation to MEETING_SUMMARY_CHANNEL_ID
+                    const summaryChannel = await client.channels.fetch(MEETING_SUMMARY_CHANNEL_ID);
+                    const confirmationMsg = await summaryChannel.send({
+                        content: `✅ **Meeting Scheduled**\n\n` +
+                                `📝 **${session.title}**\n` +
+                                `👤 Scheduled by: <@${message.author.id}>\n` +
+                                `📅 ${dateDispStr}\n` +
+                                `🕐 ${startTimeDispStr} - ${endTimeDispStr} IST (${durationStr})\n` +
+                                `📍 ${channel.name}\n\n` +
+                                `⏰ Attendance tracking will start automatically at meeting time.\n` +
+                                `📅 Discord event created!`
+                    });
+                    
+                    // Store meeting
+                    scheduledMeetings.set(meetingId, {
+                        startTime: startTime,
+                        endTime: endTime,
+                        topic: session.title,
+                        channelId: channel.id,
+                        channelName: channel.name,
+                        creatorId: message.author.id,
+                        confirmationMsg: confirmationMsg,
+                        status: 'scheduled',
+                        eventId: scheduledEvent.id
+                    });
+                    
+                    console.log(`📅 Meeting scheduled by ${message.author.username}: ${session.title} at ${startTimeDispStr}`);
+                    
+                    // Send success message then cleanup
+                    const successMsg = await message.channel.send(
+                        `✅ **Meeting Scheduled Successfully!**\n\n` +
+                        `📝 **${session.title}**\n` +
+                        `📅 ${dateDispStr}\n` +
+                        `🕐 ${startTimeDispStr} - ${endTimeDispStr} IST\n` +
+                        `📍 ${channel.name}\n\n` +
+                        `Check <#${MEETING_SUMMARY_CHANNEL_ID}> for details!`
+                    );
+                    session.messages.push(successMsg);
+                    
+                    // Delete all wizard messages after 5 seconds
+                    setTimeout(async () => {
+                        for (const msg of session.messages) {
+                            try { await msg.delete(); } catch (e) {}
+                        }
+                    }, 5000);
+                    
+                    meetingWizardSessions.delete(userId);
+                }
             } catch (error) {
-                console.error('Error in NL meeting scheduling:', error);
-                await message.reply('❌ Could not schedule meeting. Try: `schedule meeting "Topic" tomorrow 8 PM to 9 PM`');
+                console.error('Error in meeting wizard:', error);
+                const errorMsg = await message.channel.send(`❌ Error scheduling meeting: ${error.message}`);
+                session.messages.push(errorMsg);
             }
             return;
         }
