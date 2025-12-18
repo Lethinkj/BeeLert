@@ -1150,7 +1150,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             
             // Schedule Meeting button
             if (interaction.customId === 'schedule_meeting') {
-                const channelList = VOICE_CHANNELS.map((ch, idx) => `${idx + 1}. ${ch.name}`).join('\n');
+                if (interaction.replied || interaction.deferred) return;
                 
                 const modal = new ModalBuilder()
                     .setCustomId('schedule_modal')
@@ -1205,15 +1205,24 @@ client.on(Events.InteractionCreate, async (interaction) => {
             
             // Start Wizard button - starts the step-by-step chat wizard
             if (interaction.customId === 'start_wizard') {
+                if (interaction.replied || interaction.deferred) return;
+                
                 const userId = interaction.user.id;
                 
                 // Check if user already has an active session
                 if (meetingWizardSessions.has(userId)) {
-                    return interaction.reply({
+                    await interaction.reply({
                         content: '⚠️ You already have an active scheduling session. Complete it or type `cancel` to start over.',
                         flags: MessageFlags.Ephemeral
                     });
+                    return;
                 }
+                
+                // Reply first to acknowledge
+                await interaction.reply({
+                    content: '✅ Wizard started! Answer the questions in the channel.',
+                    flags: MessageFlags.Ephemeral
+                });
                 
                 // Initialize new session
                 const session = {
@@ -1241,18 +1250,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 
                 // Send first prompt
                 const promptMsg = await interaction.channel.send(
-                    `📅 **Meeting Scheduler** - Step 1/4\n\n` +
+                    `📅 **Meeting Scheduler** - Step 1/5\n\n` +
                     `Hey <@${userId}>! Let's schedule your meeting.\n\n` +
                     `📝 **What's the meeting title/topic?**\n` +
                     `_(e.g., "Team Standup", "Project Review")_\n\n` +
                     `_Type \`cancel\` to exit_`
                 );
                 session.messages.push(promptMsg);
-                
-                await interaction.reply({
-                    content: '✅ Wizard started! Answer the questions in the channel.',
-                    flags: MessageFlags.Ephemeral
-                });
                 return;
             }
             
@@ -2022,7 +2026,7 @@ client.on(Events.MessageCreate, async (message) => {
             }, WIZARD_TIMEOUT + 1000);
             
             const promptMsg = await message.channel.send(
-                `📅 **Meeting Scheduler** - Step 1/4\n\n` +
+                `📅 **Meeting Scheduler** - Step 1/5\n\n` +
                 `Hey <@${userId}>! Let's schedule your meeting.\n\n` +
                 `📝 **What's the meeting title/topic?**\n` +
                 `_(e.g., "Team Standup", "Project Review")_\n\n` +
@@ -2043,7 +2047,7 @@ client.on(Events.MessageCreate, async (message) => {
                     session.step = 'date';
                     
                     const promptMsg = await message.channel.send(
-                        `📅 **Meeting Scheduler** - Step 2/4\n\n` +
+                        `📅 **Meeting Scheduler** - Step 2/5\n\n` +
                         `Great! Topic: **${session.title}**\n\n` +
                         `📆 **When is the meeting?**\n` +
                         `• \`today\` - Today\n` +
@@ -2081,66 +2085,83 @@ client.on(Events.MessageCreate, async (message) => {
                         return;
                     }
                     
-                    session.step = 'time';
+                    session.step = 'start_time';
                     const dateStr = `${session.date.day}/${session.date.month}/${session.date.year}`;
                     
                     const promptMsg = await message.channel.send(
-                        `📅 **Meeting Scheduler** - Step 3/4\n\n` +
+                        `📅 **Meeting Scheduler** - Step 3/5\n\n` +
                         `Topic: **${session.title}**\n` +
                         `Date: **${dateStr}**\n\n` +
-                        `⏰ **What time? (IST)**\n` +
-                        `• \`8 PM\` or \`8:30 PM\` - Single time (1 hour meeting)\n` +
-                        `• \`8 PM - 10 PM\` - Time range\n` +
-                        `• \`20:00 - 22:00\` - 24-hour format\n\n` +
+                        `⏰ **What's the START time? (IST)**\n` +
+                        `• \`8 PM\` or \`8:30 PM\`\n` +
+                        `• \`20:00\` (24-hour format)\n\n` +
                         `_Type \`cancel\` to exit_`
                     );
                     session.messages.push(promptMsg);
                     
-                } else if (session.step === 'time') {
-                    // Parse time - support various formats
+                } else if (session.step === 'start_time') {
+                    // Parse start time
                     const timeInput = message.content.trim();
-                    let startHours = null, startMinutes = 0, endHours = null, endMinutes = 0;
+                    let startHours = null, startMinutes = 0;
                     
-                    // Try range: "8 PM - 10 PM" or "8PM-10PM" or "20:00 - 22:00"
-                    const rangeMatch = timeInput.match(/(\d{1,2}):?(\d{2})?\s*(am|pm)?\s*[-–to]+\s*(\d{1,2}):?(\d{2})?\s*(am|pm)?/i);
-                    if (rangeMatch) {
-                        startHours = parseInt(rangeMatch[1]);
-                        startMinutes = rangeMatch[2] ? parseInt(rangeMatch[2]) : 0;
-                        const startPeriod = rangeMatch[3]?.toUpperCase();
-                        endHours = parseInt(rangeMatch[4]);
-                        endMinutes = rangeMatch[5] ? parseInt(rangeMatch[5]) : 0;
-                        const endPeriod = rangeMatch[6]?.toUpperCase() || startPeriod;
+                    const timeMatch = timeInput.match(/(\d{1,2}):?(\d{2})?\s*(am|pm)?/i);
+                    if (timeMatch) {
+                        startHours = parseInt(timeMatch[1]);
+                        startMinutes = timeMatch[2] ? parseInt(timeMatch[2]) : 0;
+                        const period = timeMatch[3]?.toUpperCase();
                         
-                        // Convert to 24-hour if AM/PM provided
-                        if (startPeriod === 'PM' && startHours !== 12) startHours += 12;
-                        if (startPeriod === 'AM' && startHours === 12) startHours = 0;
-                        if (endPeriod === 'PM' && endHours !== 12) endHours += 12;
-                        if (endPeriod === 'AM' && endHours === 12) endHours = 0;
-                    } else {
-                        // Single time: "8 PM" or "8:30 PM" or "20:00"
-                        const singleMatch = timeInput.match(/(\d{1,2}):?(\d{2})?\s*(am|pm)?/i);
-                        if (singleMatch) {
-                            startHours = parseInt(singleMatch[1]);
-                            startMinutes = singleMatch[2] ? parseInt(singleMatch[2]) : 0;
-                            const period = singleMatch[3]?.toUpperCase();
-                            
-                            if (period === 'PM' && startHours !== 12) startHours += 12;
-                            if (period === 'AM' && startHours === 12) startHours = 0;
-                            
-                            // Default 1 hour duration
-                            endHours = startHours + 1;
-                            endMinutes = startMinutes;
-                            if (endHours >= 24) endHours -= 24;
-                        }
+                        if (period === 'PM' && startHours !== 12) startHours += 12;
+                        if (period === 'AM' && startHours === 12) startHours = 0;
                     }
                     
                     if (startHours === null || startHours < 0 || startHours > 23) {
-                        const errorMsg = await message.channel.send(`❌ Invalid time. Try: \`8 PM\`, \`8 PM - 10 PM\`, or \`20:00 - 22:00\``);
+                        const errorMsg = await message.channel.send(`❌ Invalid time. Try: \`8 PM\`, \`8:30 PM\`, or \`20:00\``);
                         session.messages.push(errorMsg);
                         return;
                     }
                     
                     session.startTime = { hours: startHours, minutes: startMinutes };
+                    session.step = 'end_time';
+                    
+                    const formatTime = (h, m) => {
+                        const period = h >= 12 ? 'PM' : 'AM';
+                        const h12 = h % 12 || 12;
+                        return `${h12}:${m.toString().padStart(2, '0')} ${period}`;
+                    };
+                    
+                    const promptMsg = await message.channel.send(
+                        `📅 **Meeting Scheduler** - Step 4/5\n\n` +
+                        `Topic: **${session.title}**\n` +
+                        `Date: **${session.date.day}/${session.date.month}/${session.date.year}**\n` +
+                        `Start: **${formatTime(startHours, startMinutes)} IST**\n\n` +
+                        `⏰ **What's the END time? (IST)**\n` +
+                        `• \`10 PM\` or \`10:30 PM\`\n` +
+                        `• \`22:00\` (24-hour format)\n\n` +
+                        `_Type \`cancel\` to exit_`
+                    );
+                    session.messages.push(promptMsg);
+                    
+                } else if (session.step === 'end_time') {
+                    // Parse end time
+                    const timeInput = message.content.trim();
+                    let endHours = null, endMinutes = 0;
+                    
+                    const timeMatch = timeInput.match(/(\d{1,2}):?(\d{2})?\s*(am|pm)?/i);
+                    if (timeMatch) {
+                        endHours = parseInt(timeMatch[1]);
+                        endMinutes = timeMatch[2] ? parseInt(timeMatch[2]) : 0;
+                        const period = timeMatch[3]?.toUpperCase();
+                        
+                        if (period === 'PM' && endHours !== 12) endHours += 12;
+                        if (period === 'AM' && endHours === 12) endHours = 0;
+                    }
+                    
+                    if (endHours === null || endHours < 0 || endHours > 23) {
+                        const errorMsg = await message.channel.send(`❌ Invalid time. Try: \`10 PM\`, \`10:30 PM\`, or \`22:00\``);
+                        session.messages.push(errorMsg);
+                        return;
+                    }
+                    
                     session.endTime = { hours: endHours, minutes: endMinutes };
                     session.step = 'channel';
                     
@@ -2151,10 +2172,10 @@ client.on(Events.MessageCreate, async (message) => {
                     };
                     
                     const promptMsg = await message.channel.send(
-                        `📅 **Meeting Scheduler** - Step 4/4\n\n` +
+                        `📅 **Meeting Scheduler** - Step 5/5\n\n` +
                         `Topic: **${session.title}**\n` +
                         `Date: **${session.date.day}/${session.date.month}/${session.date.year}**\n` +
-                        `Time: **${formatTime(startHours, startMinutes)} - ${formatTime(endHours, endMinutes)} IST**\n\n` +
+                        `Time: **${formatTime(session.startTime.hours, session.startTime.minutes)} - ${formatTime(endHours, endMinutes)} IST**\n\n` +
                         `📍 **Which voice channel?**\n` +
                         `• \`1\` - 🌴 Lounge\n` +
                         `• \`2\` - 💬 Aura 7F\n` +
@@ -2196,14 +2217,14 @@ client.on(Events.MessageCreate, async (message) => {
                     if (startTime.getTime() <= Date.now()) {
                         const errorMsg = await message.channel.send(`❌ Start time must be in the future.\nCurrent IST: ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}`);
                         session.messages.push(errorMsg);
-                        session.step = 'time';
+                        session.step = 'start_time';
                         return;
                     }
                     
                     if (endTime.getTime() <= startTime.getTime()) {
-                        const errorMsg = await message.channel.send(`❌ End time must be after start time. Please re-enter time.`);
+                        const errorMsg = await message.channel.send(`❌ End time must be after start time. Please re-enter end time.`);
                         session.messages.push(errorMsg);
-                        session.step = 'time';
+                        session.step = 'end_time';
                         return;
                     }
                     
