@@ -168,14 +168,17 @@ function clearHistory(contextId) {
 function parseNaturalLanguageReminder(text) {
     const lowerText = text.toLowerCase();
     
-    // Check for reminder-related keywords
+    // Check for reminder-related keywords (expanded)
     const reminderKeywords = [
         'remind me', 'set reminder', 'set a reminder', 'daily reminder',
         'reminder at', 'remind at', 'remind me at', 'set my reminder',
         'create reminder', 'schedule reminder', 'want a reminder',
         'need a reminder', 'can you remind', 'please remind',
         'reminder for', 'remind me to', 'remind me every day',
-        'remind me daily', 'set up reminder', 'setup reminder'
+        'remind me daily', 'set up reminder', 'setup reminder',
+        'wake me', 'alert me', 'notify me', 'ping me', 'message me',
+        'dm me at', 'send me reminder', 'daily ping', 'everyday reminder',
+        'remind every day', 'remind daily'
     ];
     
     const isReminderRequest = reminderKeywords.some(keyword => lowerText.includes(keyword));
@@ -184,13 +187,14 @@ function parseNaturalLanguageReminder(text) {
         return { isReminderRequest: false };
     }
     
-    // Try to extract time from the message
-    // Patterns: "9 PM", "9:00 PM", "21:00", "9pm", "at 9", "for 9 PM"
+    // Try to extract time from the message (improved patterns)
     const timePatterns = [
-        /(?:at|for|around|@)\s*(\d{1,2}):?(\d{2})?\s*(am|pm|AM|PM)/i,
-        /(\d{1,2}):(\d{2})\s*(am|pm|AM|PM)/i,
-        /(\d{1,2})\s*(am|pm|AM|PM)/i,
+        /(?:at|for|around|@|by)\s*(\d{1,2}):(\d{2})\s*(am|pm)/i,
+        /(?:at|for|around|@|by)\s*(\d{1,2})\s*(am|pm)/i,
+        /(\d{1,2}):(\d{2})\s*(am|pm)/i,
+        /(\d{1,2})\s*(am|pm)/i,
         /(\d{1,2}):(\d{2})(?!\s*(?:am|pm))/i, // 24-hour format like 21:00
+        /(?:at|for|around|@|by)\s*(\d{1,2})(?:\s|$)/i, // "at 9" without AM/PM
     ];
     
     let hours = null;
@@ -201,8 +205,15 @@ function parseNaturalLanguageReminder(text) {
         const match = text.match(pattern);
         if (match) {
             hours = parseInt(match[1]);
-            minutes = match[2] ? parseInt(match[2]) : 0;
-            period = match[3]?.toUpperCase() || null;
+            // Check if minutes exist in capture group
+            if (match[2] && !isNaN(parseInt(match[2])) && match[2].length <= 2 && parseInt(match[2]) < 60) {
+                minutes = parseInt(match[2]);
+                period = match[3]?.toUpperCase() || null;
+            } else if (match[2] && /^(am|pm)$/i.test(match[2])) {
+                period = match[2].toUpperCase();
+            } else {
+                period = match[3]?.toUpperCase() || null;
+            }
             break;
         }
     }
@@ -212,32 +223,55 @@ function parseNaturalLanguageReminder(text) {
         return { isReminderRequest: true, time: null };
     }
     
-    // Validate
+    // Validate basic hours
     if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) {
         return { isReminderRequest: true, time: null };
+    }
+    
+    // Smart AM/PM inference if not specified
+    if (!period) {
+        // Check for context clues
+        if (lowerText.includes('morning') || lowerText.includes('breakfast')) {
+            period = 'AM';
+        } else if (lowerText.includes('evening') || lowerText.includes('night') || lowerText.includes('dinner')) {
+            period = 'PM';
+        } else if (hours >= 1 && hours <= 6) {
+            // 1-6 without AM/PM likely means PM for reminders
+            period = 'PM';
+        } else if (hours >= 7 && hours <= 11) {
+            // 7-11 could be either, default to PM for productivity reminders
+            period = 'PM';
+        }
     }
     
     // Convert to 24-hour format
     if (period === 'PM' && hours !== 12) hours += 12;
     if (period === 'AM' && hours === 12) hours = 0;
     
+    // Clamp hours to valid range
+    if (hours > 23) hours = hours - 12;
+    
     // Create display format
     const displayHour = hours > 12 ? hours - 12 : hours === 0 ? 12 : hours;
     const displayPeriod = hours >= 12 ? 'PM' : 'AM';
     const display12hr = `${displayHour}:${minutes.toString().padStart(2, '0')} ${displayPeriod}`;
     
-    // Try to extract custom message (text after "to" or "with message")
+    // Try to extract custom message (improved patterns)
     let customMessage = null;
     const messagePatterns = [
-        /(?:to|for)\s+(?:post|share|update|submit|do|complete|finish)\s+(.+?)(?:\s+at\s+\d|$)/i,
-        /(?:with message|message:?|saying)\s*[:\s]?\s*["']?(.+?)["']?$/i,
+        /(?:to|for)\s+(?:post|share|update|submit|do|complete|finish|work on|study|practice|learn)\s+(.+?)(?:\s+at\s+\d|$)/i,
+        /(?:with message|message:?|saying|to say)\s*[:\s]?\s*["']?(.+?)["']?$/i,
+        /remind(?:er)?\s+(?:me\s+)?(?:to\s+)?["'](.+?)["']/i,
     ];
     
     for (const pattern of messagePatterns) {
         const match = text.match(pattern);
         if (match && match[1] && match[1].length > 3) {
             customMessage = match[1].trim();
-            break;
+            // Clean up the message
+            customMessage = customMessage.replace(/\s+at\s+\d{1,2}.*$/i, '').trim();
+            if (customMessage.length > 3) break;
+            customMessage = null;
         }
     }
     
@@ -248,6 +282,160 @@ function parseNaturalLanguageReminder(text) {
         minutes,
         display12hr,
         customMessage
+    };
+}
+
+/**
+ * Parse natural language for meeting scheduling
+ * @param {string} text - User's message
+ * @returns {Object} - Meeting details or null
+ */
+function parseNaturalLanguageMeeting(text) {
+    const lowerText = text.toLowerCase();
+    
+    // Check for meeting-related keywords
+    const meetingKeywords = [
+        'schedule meeting', 'schedule a meeting', 'create meeting', 'set up meeting',
+        'setup meeting', 'plan meeting', 'arrange meeting', 'book meeting',
+        'meeting at', 'meeting from', 'meeting for', 'lets meet', "let's meet",
+        'have a meeting', 'start meeting', 'schedule meet', 'arrange meet'
+    ];
+    
+    const isMeetingRequest = meetingKeywords.some(keyword => lowerText.includes(keyword));
+    
+    if (!isMeetingRequest) {
+        return { isMeetingRequest: false };
+    }
+    
+    // Extract topic (text in quotes or after "about/for/on")
+    let topic = null;
+    const topicPatterns = [
+        /["'](.+?)["']/,
+        /(?:about|for|on|regarding|topic:?)\s+(.+?)(?:\s+(?:at|from|on|tomorrow|today|\d))/i,
+        /meeting\s+(?:about|for|on)\s+(.+?)(?:\s+(?:at|from|on|tomorrow|today|\d)|$)/i,
+    ];
+    
+    for (const pattern of topicPatterns) {
+        const match = text.match(pattern);
+        if (match && match[1]) {
+            topic = match[1].trim();
+            if (topic.length > 2 && topic.length < 100) break;
+            topic = null;
+        }
+    }
+    
+    // Extract date
+    let targetDate = null;
+    // Use proper IST date calculation
+    const nowUTC = new Date();
+    const istOffset = 5.5 * 60 * 60 * 1000;
+    const nowIST = new Date(nowUTC.getTime() + istOffset);
+    
+    if (lowerText.includes('today')) {
+        targetDate = { day: nowIST.getUTCDate(), month: nowIST.getUTCMonth() + 1, year: nowIST.getUTCFullYear() };
+    } else if (lowerText.includes('tomorrow')) {
+        const tomorrowIST = new Date(nowIST.getTime() + 24 * 60 * 60 * 1000);
+        targetDate = { day: tomorrowIST.getUTCDate(), month: tomorrowIST.getUTCMonth() + 1, year: tomorrowIST.getUTCFullYear() };
+    } else {
+        // Try to parse DD/MM or DD/MM/YYYY
+        const dateMatch = text.match(/(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/);
+        if (dateMatch) {
+            const day = parseInt(dateMatch[1]);
+            const month = parseInt(dateMatch[2]);
+            const year = dateMatch[3] ? (dateMatch[3].length === 2 ? 2000 + parseInt(dateMatch[3]) : parseInt(dateMatch[3])) : nowIST.getUTCFullYear();
+            if (day >= 1 && day <= 31 && month >= 1 && month <= 12) {
+                targetDate = { day, month, year };
+            }
+        }
+    }
+    
+    // Default to today (IST) if no date
+    if (!targetDate) {
+        targetDate = { day: nowIST.getUTCDate(), month: nowIST.getUTCMonth() + 1, year: nowIST.getUTCFullYear() };
+    }
+    
+    // Extract start and end times
+    let startHours = null, startMinutes = 0, endHours = null, endMinutes = 0;
+    
+    // Pattern: "from 8 PM to 10 PM" or "8 PM - 10 PM" or "8-10 PM"
+    const rangePatterns = [
+        /(?:from\s+)?(\d{1,2}):?(\d{2})?\s*(am|pm)?\s*(?:to|-)\s*(\d{1,2}):?(\d{2})?\s*(am|pm)/i,
+        /(\d{1,2}):?(\d{2})?\s*(am|pm)\s*(?:to|-)\s*(\d{1,2}):?(\d{2})?\s*(am|pm)/i,
+        /(?:at\s+)?(\d{1,2}):?(\d{2})?\s*(am|pm)(?:\s+for\s+(\d+)\s*(?:hour|hr)s?)?/i,
+    ];
+    
+    for (const pattern of rangePatterns) {
+        const match = text.match(pattern);
+        if (match) {
+            startHours = parseInt(match[1]);
+            startMinutes = match[2] ? parseInt(match[2]) : 0;
+            let startPeriod = match[3]?.toUpperCase();
+            
+            if (match[4] && !match[4].match(/hour|hr/i)) {
+                // Has end time
+                endHours = parseInt(match[4]);
+                endMinutes = match[5] ? parseInt(match[5]) : 0;
+                const endPeriod = match[6]?.toUpperCase() || startPeriod;
+                
+                // Infer start period from end period if not specified
+                if (!startPeriod && endPeriod) {
+                    startPeriod = (startHours > endHours || (startHours === endHours && startMinutes >= endMinutes)) ? 'AM' : endPeriod;
+                }
+                
+                // Convert to 24-hour
+                if (startPeriod === 'PM' && startHours !== 12) startHours += 12;
+                if (startPeriod === 'AM' && startHours === 12) startHours = 0;
+                if (endPeriod === 'PM' && endHours !== 12) endHours += 12;
+                if (endPeriod === 'AM' && endHours === 12) endHours = 0;
+            } else if (match[4]) {
+                // Has duration in hours
+                const durationHours = parseInt(match[4]);
+                if (startPeriod === 'PM' && startHours !== 12) startHours += 12;
+                if (startPeriod === 'AM' && startHours === 12) startHours = 0;
+                endHours = startHours + durationHours;
+                endMinutes = startMinutes;
+                if (endHours >= 24) endHours -= 24;
+            } else {
+                // Only start time, default to 1 hour meeting
+                if (startPeriod === 'PM' && startHours !== 12) startHours += 12;
+                if (startPeriod === 'AM' && startHours === 12) startHours = 0;
+                endHours = startHours + 1;
+                endMinutes = startMinutes;
+                if (endHours >= 24) endHours -= 24;
+            }
+            break;
+        }
+    }
+    
+    // Extract channel preference
+    let channelNum = null;
+    const channelPatterns = [
+        /(?:in|at|channel)\s*(?:room\s*)?(\d)/i,
+        /room\s*(\d)/i,
+        /lounge/i,
+        /aura/i,
+    ];
+    
+    if (lowerText.includes('lounge')) channelNum = 1;
+    else if (lowerText.includes('aura')) channelNum = 2;
+    else if (lowerText.includes('room 1') || lowerText.includes('room1')) channelNum = 3;
+    else if (lowerText.includes('room 2') || lowerText.includes('room2')) channelNum = 4;
+    else {
+        const channelMatch = text.match(/(?:channel|room)\s*(\d)/i);
+        if (channelMatch) channelNum = parseInt(channelMatch[1]);
+    }
+    
+    return {
+        isMeetingRequest: true,
+        topic,
+        targetDate,
+        startHours,
+        startMinutes,
+        endHours,
+        endMinutes,
+        channelNum,
+        hasTime: startHours !== null,
+        hasTopic: topic !== null
     };
 }
 
@@ -325,9 +513,22 @@ app.listen(PORT, () => {
 // IST is UTC+5:30 (Render uses UTC/GMT)
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000; // 5 hours 30 minutes in milliseconds
 
-// Helper function to get current IST time
+// Helper function to get current IST time components
+// Returns an object with IST date/time components for easy comparison
 function getISTTime() {
-    return new Date(Date.now() + IST_OFFSET_MS);
+    const now = new Date();
+    // Use toLocaleString to get actual IST time, then parse it
+    const istString = now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' });
+    const istDate = new Date(istString);
+    return istDate;
+}
+
+// Helper function to get IST hours and minutes as string (for reminder comparison)
+function getISTTimeString() {
+    const now = new Date();
+    const hours = parseInt(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata', hour: 'numeric', hour12: false }));
+    const minutes = parseInt(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata', minute: 'numeric' }));
+    return `${hours}:${minutes.toString().padStart(2, '0')}`;
 }
 
 // Helper function to format IST time (date is already IST-adjusted from getISTTime())
@@ -1707,6 +1908,226 @@ client.on(Events.MessageCreate, async (message) => {
     }
 
     // Server message handler starts here
+    // Natural language meeting scheduling in schedule-meet channel
+    if (message.channel.id === SCHEDULE_MEET_CHANNEL_ID && !message.content.startsWith('!')) {
+        const meetingResult = parseNaturalLanguageMeeting(message.content);
+        
+        if (meetingResult.isMeetingRequest) {
+            try {
+                await message.channel.sendTyping();
+                
+                // Collect messages to delete later
+                const messagesToDelete = [message];
+                
+                // Check what info is missing
+                if (!meetingResult.hasTopic || !meetingResult.hasTime) {
+                    // Use AI to help extract or ask for missing info
+                    const aiPrompt = `Extract meeting details from: "${message.content}"
+                    
+Return ONLY a JSON object (no markdown, no explanation):
+{
+  "topic": "meeting topic or null",
+  "date": "today/tomorrow/DD/MM or null",
+  "startTime": "HH:MM AM/PM or null",
+  "endTime": "HH:MM AM/PM or null",
+  "channel": "channel number 1-4 or null"
+}`;
+                    
+                    const aiResponse = await aiService.askQuestion(aiPrompt);
+                    
+                    try {
+                        // Try to parse AI response
+                        const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);
+                        if (jsonMatch) {
+                            const parsed = JSON.parse(jsonMatch[0]);
+                            if (parsed.topic && !meetingResult.topic) meetingResult.topic = parsed.topic;
+                            if (parsed.startTime && !meetingResult.hasTime) {
+                                const timeMatch = parsed.startTime.match(/(\d{1,2}):?(\d{2})?\s*(am|pm)/i);
+                                if (timeMatch) {
+                                    meetingResult.startHours = parseInt(timeMatch[1]);
+                                    meetingResult.startMinutes = timeMatch[2] ? parseInt(timeMatch[2]) : 0;
+                                    const period = timeMatch[3].toUpperCase();
+                                    if (period === 'PM' && meetingResult.startHours !== 12) meetingResult.startHours += 12;
+                                    if (period === 'AM' && meetingResult.startHours === 12) meetingResult.startHours = 0;
+                                    meetingResult.hasTime = true;
+                                }
+                            }
+                            if (parsed.endTime) {
+                                const endMatch = parsed.endTime.match(/(\d{1,2}):?(\d{2})?\s*(am|pm)/i);
+                                if (endMatch) {
+                                    meetingResult.endHours = parseInt(endMatch[1]);
+                                    meetingResult.endMinutes = endMatch[2] ? parseInt(endMatch[2]) : 0;
+                                    const period = endMatch[3].toUpperCase();
+                                    if (period === 'PM' && meetingResult.endHours !== 12) meetingResult.endHours += 12;
+                                    if (period === 'AM' && meetingResult.endHours === 12) meetingResult.endHours = 0;
+                                }
+                            }
+                            if (parsed.channel && !meetingResult.channelNum) {
+                                meetingResult.channelNum = parseInt(parsed.channel);
+                            }
+                        }
+                    } catch (parseErr) {
+                        // AI couldn't parse, continue with what we have
+                    }
+                }
+                
+                // Still missing critical info? Ask user
+                if (!meetingResult.topic || !meetingResult.hasTime) {
+                    let missingInfo = [];
+                    if (!meetingResult.topic) missingInfo.push('**topic** (e.g., "Project Discussion")');
+                    if (!meetingResult.hasTime) missingInfo.push('**time** (e.g., "8 PM to 10 PM")');
+                    
+                    const askMsg = await message.reply(
+                        `📝 I need a bit more info to schedule:\n` +
+                        `Missing: ${missingInfo.join(', ')}\n\n` +
+                        `**Try:** \`schedule meeting "Team Sync" tomorrow 8 PM to 9 PM in room 1\``
+                    );
+                    messagesToDelete.push(askMsg);
+                    
+                    // Delete after 30 seconds
+                    setTimeout(async () => {
+                        for (const msg of messagesToDelete) {
+                            try { await msg.delete(); } catch (e) {}
+                        }
+                    }, 30000);
+                    return;
+                }
+                
+                // Set defaults
+                if (!meetingResult.channelNum) meetingResult.channelNum = 1; // Default to Lounge
+                if (!meetingResult.endHours) {
+                    meetingResult.endHours = meetingResult.startHours + 1;
+                    meetingResult.endMinutes = meetingResult.startMinutes;
+                    if (meetingResult.endHours >= 24) meetingResult.endHours -= 24;
+                }
+                
+                const channel = VOICE_CHANNELS[meetingResult.channelNum - 1] || VOICE_CHANNELS[0];
+                const targetDate = meetingResult.targetDate;
+                
+                // Create Date objects - these are in UTC internally but represent IST times
+                const startTime = new Date(`${targetDate.year}-${targetDate.month.toString().padStart(2, '0')}-${targetDate.day.toString().padStart(2, '0')}T${meetingResult.startHours.toString().padStart(2, '0')}:${meetingResult.startMinutes.toString().padStart(2, '0')}:00+05:30`);
+                const endTime = new Date(`${targetDate.year}-${targetDate.month.toString().padStart(2, '0')}-${targetDate.day.toString().padStart(2, '0')}T${meetingResult.endHours.toString().padStart(2, '0')}:${meetingResult.endMinutes.toString().padStart(2, '0')}:00+05:30`);
+                
+                // Debug log for timezone verification
+                console.log(`📅 NL Meeting Parse Debug:`);
+                console.log(`   Target Date: ${targetDate.day}/${targetDate.month}/${targetDate.year}`);
+                console.log(`   Start Time (24h): ${meetingResult.startHours}:${meetingResult.startMinutes}`);
+                console.log(`   End Time (24h): ${meetingResult.endHours}:${meetingResult.endMinutes}`);
+                console.log(`   Start UTC: ${startTime.toISOString()}`);
+                console.log(`   End UTC: ${endTime.toISOString()}`);
+                console.log(`   Current UTC: ${new Date().toISOString()}`);
+                
+                // Validate - compare UTC timestamps
+                if (startTime.getTime() <= Date.now()) {
+                    const errorMsg = await message.reply('❌ Start time must be in the future. Current IST: ' + new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }));
+                    messagesToDelete.push(errorMsg);
+                    setTimeout(async () => {
+                        for (const msg of messagesToDelete) {
+                            try { await msg.delete(); } catch (e) {}
+                        }
+                    }, 10000);
+                    return;
+                }
+                
+                if (endTime.getTime() <= startTime.getTime()) {
+                    const errorMsg = await message.reply('❌ End time must be after start time.');
+                    messagesToDelete.push(errorMsg);
+                    setTimeout(async () => {
+                        for (const msg of messagesToDelete) {
+                            try { await msg.delete(); } catch (e) {}
+                        }
+                    }, 10000);
+                    return;
+                }
+                
+                const meetingId = Date.now().toString();
+                
+                // Format display strings
+                const dateDispStr = startTime.toLocaleDateString('en-IN', {
+                    timeZone: 'Asia/Kolkata',
+                    weekday: 'long',
+                    year: 'numeric',
+                    month: 'long',
+                    day: 'numeric'
+                });
+                const startTimeDispStr = startTime.toLocaleTimeString('en-IN', {
+                    timeZone: 'Asia/Kolkata',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    hour12: true
+                });
+                const endTimeDispStr = endTime.toLocaleTimeString('en-IN', {
+                    timeZone: 'Asia/Kolkata',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    hour12: true
+                });
+                
+                // Calculate duration
+                const durationMs = endTime.getTime() - startTime.getTime();
+                const durationHours = Math.floor(durationMs / (1000 * 60 * 60));
+                const durationMinutes = Math.floor((durationMs % (1000 * 60 * 60)) / (1000 * 60));
+                const durationStr = `${durationHours}h ${durationMinutes}m`;
+                
+                // Create Discord Scheduled Event
+                const guild = message.guild;
+                const scheduledEvent = await guild.scheduledEvents.create({
+                    name: meetingResult.topic,
+                    scheduledStartTime: startTime,
+                    scheduledEndTime: endTime,
+                    privacyLevel: GuildScheduledEventPrivacyLevel.GuildOnly,
+                    entityType: GuildScheduledEventEntityType.Voice,
+                    channel: channel.id,
+                    description: `Scheduled by ${message.author.username} via natural language.`
+                });
+                
+                // Post confirmation to MEETING_SUMMARY_CHANNEL_ID
+                const summaryChannel = await client.channels.fetch(MEETING_SUMMARY_CHANNEL_ID);
+                const confirmationMsg = await summaryChannel.send({
+                    content: `✅ **Meeting Scheduled**\n\n` +
+                            `📝 **${meetingResult.topic}**\n` +
+                            `👤 Scheduled by: <@${message.author.id}>\n` +
+                            `📅 ${dateDispStr}\n` +
+                            `🕐 ${startTimeDispStr} - ${endTimeDispStr} IST (${durationStr})\n` +
+                            `📍 ${channel.name}\n\n` +
+                            `⏰ Attendance tracking will start automatically at meeting time.\n` +
+                            `📅 Discord event created!`
+                });
+                
+                // Store meeting
+                scheduledMeetings.set(meetingId, {
+                    startTime: startTime,
+                    endTime: endTime,
+                    topic: meetingResult.topic,
+                    channelId: channel.id,
+                    channelName: channel.name,
+                    creatorId: message.author.id,
+                    confirmationMsg: confirmationMsg,
+                    status: 'scheduled',
+                    eventId: scheduledEvent.id
+                });
+                
+                console.log(`📅 NL Meeting scheduled by ${message.author.username}: ${meetingResult.topic} at ${startTimeDispStr}`);
+                
+                // Send quick confirmation then delete
+                const quickConfirm = await message.reply(`✅ Meeting **"${meetingResult.topic}"** scheduled for ${startTimeDispStr}! Check <#${MEETING_SUMMARY_CHANNEL_ID}> for details.`);
+                messagesToDelete.push(quickConfirm);
+                
+                // Delete all scheduling messages after 5 seconds
+                setTimeout(async () => {
+                    for (const msg of messagesToDelete) {
+                        try { await msg.delete(); } catch (e) {}
+                    }
+                }, 5000);
+                
+            } catch (error) {
+                console.error('Error in NL meeting scheduling:', error);
+                await message.reply('❌ Could not schedule meeting. Try: `schedule meeting "Topic" tomorrow 8 PM to 9 PM`');
+            }
+            return;
+        }
+    }
+
     // Gemini AI Chat in dedicated channel
     if (message.channel.id === GEMINI_CHANNEL_ID && !message.content.startsWith('!')) {
         try {

@@ -8,8 +8,8 @@ let model;
 if (GEMINI_API_KEY) {
     try {
         genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-        model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
-        console.log('✅ Gemini AI service initialized successfully (Gemini 2.5 Flash)');
+        model = genAI.getGenerativeModel({ model: "gemini-2.0-flash-lite" });
+        console.log('✅ Gemini AI service initialized successfully (Gemini 2.0 Flash Lite)');
     } catch (error) {
         console.error('❌ Error initializing Gemini:', error);
         genAI = null;
@@ -40,6 +40,10 @@ async function askQuestion(question) {
         
         if (error.message.includes('API_KEY') || error.message.includes('401')) {
             return "❌ **Gemini API Error**: The API key is invalid.\n\n**To fix:**\n1. Get a new API key from Google AI Studio\n2. Update `GEMINI_API_KEY` in your `.env` file\n3. Restart the bot";
+        }
+        
+        if (error.message.includes('429')) {
+            return "⏳ Too many requests. Please wait a moment and try again.";
         }
         
         return "Sorry, I encountered an error processing your question. Please try again later.";
@@ -109,6 +113,11 @@ async function askWithHistory(question, history = [], systemPrompt = '') {
         return response.text();
     } catch (error) {
         console.error('❌ Error in Gemini with history:', error.message);
+        
+        if (error.message.includes('429')) {
+            return "⏳ Too many requests. Please wait a moment and try again.";
+        }
+        
         return "Sorry, I encountered an error processing your question. Please try again.";
     }
 }
