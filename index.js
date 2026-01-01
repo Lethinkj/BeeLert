@@ -78,6 +78,21 @@ const BIRTHDAYS = [
     { userId: '1309201554787664026', name: 'Anitus', date: '11/12' }
 ];
 
+// Festival data (DD/MM format)
+const FESTIVALS = [
+    { name: 'New Year', date: '01/01', emoji: '🎆', type: 'global' },
+    { name: 'Pongal', date: '14/01', emoji: '🌾', type: 'south_indian' },
+    { name: 'Maha Shivaratri', date: '26/02', emoji: '🕉️', type: 'south_indian' },
+    { name: 'Easter', date: '20/04', emoji: '✝️', type: 'global' }, // Note: Easter date varies, this is approximate
+    { name: 'Tamil New Year', date: '14/04', emoji: '🎊', type: 'south_indian' },
+    { name: 'Vishu', date: '14/04', emoji: '🌺', type: 'south_indian' },
+    { name: 'Onam', date: '15/08', emoji: '🌼', type: 'south_indian' },
+    { name: 'Ganesh Chaturthi', date: '07/09', emoji: '🐘', type: 'south_indian' },
+    { name: 'Dussehra', date: '12/10', emoji: '🏹', type: 'south_indian' },
+    { name: 'Diwali', date: '01/11', emoji: '🪔', type: 'south_indian' },
+    { name: 'Christmas', date: '25/12', emoji: '🎄', type: 'global' }
+];
+
 // Bot status tracking
 let botStatus = {
     isOnline: false,
@@ -992,6 +1007,53 @@ client.once(Events.ClientReady, async (c) => {
     
     console.log('Birthday checker started - will check daily at 7:00 AM IST');
     
+    // Schedule festival checker (runs daily at 8:00 AM IST)
+    cron.schedule('0 8 * * *', async () => {
+        console.log('Running daily festival check at 8:00 AM IST...');
+        
+        const now = getISTTime();
+        const day = now.getDate().toString().padStart(2, '0');
+        const month = (now.getMonth() + 1).toString().padStart(2, '0');
+        const today = `${day}/${month}`; // DD/MM format
+        
+        // Find today's festivals
+        const todaysFestivals = FESTIVALS.filter(f => f.date === today);
+        
+        if (todaysFestivals.length > 0) {
+            const channel = await client.channels.fetch(CHANNEL_ID);
+            
+            for (const festival of todaysFestivals) {
+                try {
+                    // Generate AI festival wish
+                    const festivalWish = await aiService.askQuestion(
+                        `Generate a warm and festive greeting for ${festival.name}. ` +
+                        `${festival.type === 'south_indian' ? 'This is a South Indian festival, so include cultural significance and traditional greetings. ' : ''}` +
+                        `Include meaningful wishes and the cultural significance of the day. ` +
+                        `Make it joyful, inspiring, and celebratory. ` +
+                        `Keep it under 150 words. Format it beautifully. ` +
+                        `Do NOT include any signature or closing at the end. ` +
+                        `The message should end after the festival wishes.`
+                    );
+                    
+                    const festivalMessage = 
+                        `${festival.emoji} **HAPPY ${festival.name.toUpperCase()}!** ${festival.emoji}\n\n` +
+                        `<@&${CLAN_ROLE_ID}>\n\n` +
+                        `${festivalWish}\n\n` +
+                        `— Wishing you joy and prosperity from the Aura-7F fam 💙`;
+                    
+                    await channel.send(festivalMessage);
+                    console.log(`✅ Posted AI festival wish for ${festival.name}`);
+                } catch (error) {
+                    console.error(`Error posting festival wish for ${festival.name}:`, error);
+                }
+            }
+        }
+    }, {
+        timezone: 'Asia/Kolkata'
+    });
+    
+    console.log('Festival checker started - will check daily at 8:00 AM IST');
+    
     // Check birthdays on bot startup (backup in case bot started after 7 AM)
     setTimeout(async () => {
         console.log('Running startup birthday check (backup)...');
@@ -1032,6 +1094,48 @@ client.once(Events.ClientReady, async (c) => {
             console.log(`No birthdays today (${today})`);
         }
     }, 5000); // Wait 5 seconds after bot is ready
+    
+    // Check festivals on bot startup (backup in case bot started after 8 AM)
+    setTimeout(async () => {
+        console.log('Running startup festival check (backup)...');
+        const now = getISTTime();
+        const day = now.getDate().toString().padStart(2, '0');
+        const month = (now.getMonth() + 1).toString().padStart(2, '0');
+        const today = `${day}/${month}`; // DD/MM format
+        
+        const todaysFestivals = FESTIVALS.filter(f => f.date === today);
+        
+        if (todaysFestivals.length > 0) {
+            const channel = await client.channels.fetch(CHANNEL_ID);
+            
+            for (const festival of todaysFestivals) {
+                try {
+                    const festivalWish = await aiService.askQuestion(
+                        `Generate a warm and festive greeting for ${festival.name}. ` +
+                        `${festival.type === 'south_indian' ? 'This is a South Indian festival, so include cultural significance and traditional greetings. ' : ''}` +
+                        `Include meaningful wishes and the cultural significance of the day. ` +
+                        `Make it joyful, inspiring, and celebratory. ` +
+                        `Keep it under 150 words. Format it beautifully. ` +
+                        `Do NOT include any signature or closing at the end. ` +
+                        `The message should end after the festival wishes.`
+                    );
+                    
+                    const festivalMessage = 
+                        `${festival.emoji} **HAPPY ${festival.name.toUpperCase()}!** ${festival.emoji}\n\n` +
+                        `<@&${CLAN_ROLE_ID}>\n\n` +
+                        `${festivalWish}\n\n` +
+                        `— Wishing you joy and prosperity from the Aura-7F fam 💙`;
+                    
+                    await channel.send(festivalMessage);
+                    console.log(`✅ Posted startup festival wish for ${festival.name}`);
+                } catch (error) {
+                    console.error(`Error posting startup festival wish:`, error);
+                }
+            }
+        } else {
+            console.log(`No festivals today (${today})`);
+        }
+    }, 7000); // Wait 7 seconds after bot is ready
     
     // Schedule personal reminder checker (runs every minute)
     cron.schedule('* * * * *', async () => {
