@@ -270,8 +270,27 @@ const POINTS_INTERVAL = 5 * 60 * 1000; // 5 minutes in milliseconds
 const scheduledMeetings = new Map(); // meetingId -> { time, topic, channelId, timeoutId, creatorId, confirmationMsg, startTime, endTime, date, status }
 const activeMeetings = new Map(); // meetingId -> { actualStartTime, participants: Map(userId -> {username, joinedAt, leftAt, totalSeconds}), scheduledSummaryPosted: false, waitingForEmpty: false }
 
-// Personal reminder tracking (Note: Data is lost on restart due to Render's ephemeral filesystem)
+// Personal reminder tracking (synced with Supabase database)
 const userReminders = new Map(); // userId -> { time: '20:00', customMessage: null, active: true }
+
+/**
+ * Load all daily reminders from database into memory
+ */
+async function loadRemindersFromDatabase() {
+    try {
+        const reminders = await supabaseService.getAllDailyReminders();
+        for (const reminder of reminders) {
+            userReminders.set(reminder.user_id, {
+                time: reminder.time,
+                customMessage: reminder.custom_message,
+                active: reminder.is_active
+            });
+        }
+        console.log(`✅ Loaded ${reminders.length} daily reminders from database`);
+    } catch (error) {
+        console.error('❌ Error loading reminders from database:', error);
+    }
+}
 const conversationStates = new Map(); // userId -> { step: 'awaiting_time' | 'awaiting_message', time: string }
 const userHasChatted = new Set(); // Track users who have already chatted (for first-time AI context)
 
@@ -1107,6 +1126,9 @@ client.once(Events.ClientReady, async (c) => {
     // Update bot status
     botStatus.isOnline = true;
     botStatus.connectedAt = new Date().toISOString();
+    
+    // Load daily reminders from database
+    await loadRemindersFromDatabase();
 
     // Register slash commands
     try {
@@ -1293,54 +1315,7 @@ client.once(Events.ClientReady, async (c) => {
     
     console.log('Yearly festival updater scheduled - will run on January 2nd');
     
-    // Schedule monthly voice leaderboard (runs on 1st of each month at 7:00 AM IST)
-    cron.schedule('0 7 1 * *', async () => {
-        console.log('📊 Posting monthly voice activity leaderboard...');
-        try {
-            const now = getISTTime();
-            // Get previous month's data
-            const prevMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-            const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 
-                               'July', 'August', 'September', 'October', 'November', 'December'];
-            const monthName = monthNames[prevMonth.getMonth()];
-            const year = prevMonth.getFullYear();
-            
-            const leaderboard = await supabaseService.getMonthlyLeaderboard(10, prevMonth.getMonth() + 1, year);
-            
-            if (leaderboard && leaderboard.length > 0) {
-                const channel = await client.channels.fetch(CHANNEL_ID);
-                
-                const medals = ['🥇', '🥈', '🥉'];
-                let leaderboardText = '';
-                
-                leaderboard.forEach((entry, index) => {
-                    const medal = medals[index] || `**${index + 1}.**`;
-                    const hours = Math.floor(entry.total_minutes / 60);
-                    const mins = entry.total_minutes % 60;
-                    leaderboardText += `${medal} **${entry.username}** - ${entry.total_points} points (${hours}h ${mins}m)\n`;
-                });
-                
-                const leaderboardMessage = 
-                    `📊 **VOICE ACTIVITY LEADERBOARD** 📊\n` +
-                    `**${monthName} ${year}**\n\n` +
-                    `<@&${CLAN_ROLE_ID}>\n\n` +
-                    `${leaderboardText}\n` +
-                    `🎯 _1 point earned for every 5 minutes of voice activity!_\n\n` +
-                    `Congratulations to our most active voice chat members! 🎉`;
-                
-                await channel.send(leaderboardMessage);
-                console.log('✅ Posted monthly voice leaderboard');
-            } else {
-                console.log('No voice activity data for the previous month');
-            }
-        } catch (error) {
-            console.error('Error posting monthly leaderboard:', error);
-        }
-    }, {
-        timezone: 'Asia/Kolkata'
-    });
-    
-    console.log('Monthly leaderboard scheduler started - will post on 1st of each month at 7:00 AM IST');
+    // Monthly leaderboard is now only available via /leaderboard command (not auto-posted)
     
     // Start periodic voice points checker (every 5 minutes)
     setInterval(async () => {
@@ -2288,7 +2263,7 @@ client.on(Events.MessageCreate, async (message) => {
                     "• `remind me at 8:30 PM`\n" +
                     "• `set a reminder for 9 AM`\n" +
                     "• `daily reminder at 21:00`\n\n" +
-                    "⚠️ Note: Reminders reset on bot restart (hosting limitation)"
+                    "💾 Your reminders are saved and persist across bot restarts!"
                 );
                 return;
             }
@@ -2328,14 +2303,15 @@ client.on(Events.MessageCreate, async (message) => {
                         // Check if they also specified a custom message
                         const customMessage = reminderResult.customMessage || null;
                         
-                        // Save reminder
+                        // Save reminder to database and memory
+                        await supabaseService.saveDailyReminder(userId, timeString, customMessage);
                         userReminders.set(userId, {
                             time: timeString,
                             customMessage: customMessage,
                             active: true
                         });
                         
-                        console.log(`⏰ Natural language reminder set for ${message.author.username} at ${timeString} IST`);
+                        console.log(`⏰ Natural language reminder set for ${message.author.username} at ${timeString} IST (saved to DB)`);
                         
                         // Add to history
                         addToHistory(userId, 'user', message.content);
@@ -2464,7 +2440,8 @@ client.on(Events.MessageCreate, async (message) => {
                 
                 const customMessage = content === 'skip' ? null : message.content;
                 
-                // Save reminder settings
+                // Save reminder settings to database and memory
+                await supabaseService.saveDailyReminder(userId, state.time, customMessage);
                 userReminders.set(userId, {
                     time: state.time,
                     customMessage: customMessage,
@@ -2484,7 +2461,7 @@ client.on(Events.MessageCreate, async (message) => {
                     "**Commands:** Type `!help` to see all commands"
                 );
                 
-                console.log(`✅ Reminder created for ${message.author.username} at ${state.time}`);
+                console.log(`✅ Reminder created for ${message.author.username} at ${state.time} (saved to DB)`);
                 return;
             }
             
@@ -2514,6 +2491,7 @@ client.on(Events.MessageCreate, async (message) => {
                     return;
                 }
                 reminder.active = false;
+                await supabaseService.updateDailyReminderStatus(userId, false);
                 await message.reply("⏸️ Reminders paused. Type `!resume` to turn them back on.");
                 return;
             }
@@ -2526,6 +2504,7 @@ client.on(Events.MessageCreate, async (message) => {
                     return;
                 }
                 reminder.active = true;
+                await supabaseService.updateDailyReminderStatus(userId, true);
                 await message.reply("✅ Reminders resumed!");
                 return;
             }
@@ -2564,9 +2543,10 @@ client.on(Events.MessageCreate, async (message) => {
                     await message.reply("❌ You don't have a reminder set.");
                     return;
                 }
+                await supabaseService.deleteDailyReminder(userId);
                 userReminders.delete(userId);
                 await message.reply("❌ Daily reminder deleted. Type `reminder` anytime to set up again.");
-                console.log(`🗑️ Reminder deleted for ${message.author.username}`);
+                console.log(`🗑️ Reminder deleted for ${message.author.username} (removed from DB)`);
                 return;
             }
             

@@ -388,6 +388,120 @@ async function deleteReminder(reminderId) {
     return true;
 }
 
+// ==================== DAILY REMINDER OPERATIONS ====================
+
+/**
+ * Get all active daily reminders
+ * @returns {Promise<Array>} - Array of daily reminder objects
+ */
+async function getAllDailyReminders() {
+    if (!isConfigured) return [];
+    
+    const { data, error } = await supabase
+        .from('daily_reminders')
+        .select('*')
+        .eq('is_active', true);
+    
+    if (error) {
+        console.error('❌ Error fetching daily reminders:', error.message);
+        return [];
+    }
+    return data || [];
+}
+
+/**
+ * Get daily reminder for a specific user
+ * @param {string} userId - Discord user ID
+ * @returns {Promise<Object|null>} - Daily reminder or null
+ */
+async function getDailyReminder(userId) {
+    if (!isConfigured) return null;
+    
+    const { data, error } = await supabase
+        .from('daily_reminders')
+        .select('*')
+        .eq('user_id', userId)
+        .single();
+    
+    if (error && error.code !== 'PGRST116') { // PGRST116 = no rows returned
+        console.error('❌ Error fetching daily reminder:', error.message);
+        return null;
+    }
+    return data;
+}
+
+/**
+ * Add or update a daily reminder
+ * @param {string} userId - Discord user ID
+ * @param {string} time - Time in HH:MM format (24hr)
+ * @param {string|null} customMessage - Optional custom message
+ * @returns {Promise<Object|null>} - Created/updated reminder or null
+ */
+async function saveDailyReminder(userId, time, customMessage = null) {
+    if (!isConfigured) return null;
+    
+    const { data, error } = await supabase
+        .from('daily_reminders')
+        .upsert([{ 
+            user_id: userId, 
+            time: time, 
+            custom_message: customMessage,
+            is_active: true,
+            updated_at: new Date().toISOString()
+        }], {
+            onConflict: 'user_id'
+        })
+        .select()
+        .single();
+    
+    if (error) {
+        console.error('❌ Error saving daily reminder:', error.message);
+        return null;
+    }
+    return data;
+}
+
+/**
+ * Update daily reminder active status
+ * @param {string} userId - Discord user ID
+ * @param {boolean} isActive - Whether reminder is active
+ * @returns {Promise<boolean>} - Success status
+ */
+async function updateDailyReminderStatus(userId, isActive) {
+    if (!isConfigured) return false;
+    
+    const { error } = await supabase
+        .from('daily_reminders')
+        .update({ is_active: isActive, updated_at: new Date().toISOString() })
+        .eq('user_id', userId);
+    
+    if (error) {
+        console.error('❌ Error updating daily reminder status:', error.message);
+        return false;
+    }
+    return true;
+}
+
+/**
+ * Delete a daily reminder
+ * @param {string} userId - Discord user ID
+ * @returns {Promise<boolean>} - Success status
+ */
+async function deleteDailyReminder(userId) {
+    if (!isConfigured) return false;
+    
+    const { error } = await supabase
+        .from('daily_reminders')
+        .delete()
+        .eq('user_id', userId);
+    
+    if (error) {
+        console.error('❌ Error deleting daily reminder:', error.message);
+        return false;
+    }
+    return true;
+}
+
 // ==================== USER OPERATIONS ====================
 
 /**
@@ -866,12 +980,18 @@ module.exports = {
     logFestivalUpdate,
     getLastFestivalUpdate,
     updateFestivalByName,
-    // Reminders
+    // Reminders (one-time)
     getReminders,
     getDueReminders,
     addReminder,
     completeReminder,
     deleteReminder,
+    // Daily Reminders (recurring)
+    getAllDailyReminders,
+    getDailyReminder,
+    saveDailyReminder,
+    updateDailyReminderStatus,
+    deleteDailyReminder,
     // Users
     getUsers,
     getClanMembers,
