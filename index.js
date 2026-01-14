@@ -1,10 +1,12 @@
-const { Client, GatewayIntentBits, Events, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, Partials, MessageFlags, GuildScheduledEventEntityType, GuildScheduledEventPrivacyLevel } = require('discord.js');
+const { Client, GatewayIntentBits, Events, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, Partials, MessageFlags, GuildScheduledEventEntityType, GuildScheduledEventPrivacyLevel, SlashCommandBuilder, REST, Routes } = require('discord.js');
 const cron = require('node-cron');
 const express = require('express');
 require('dotenv').config();
 
 // Import AI service
 const aiService = require('./services/aiService');
+// Import Supabase service
+const supabaseService = require('./services/supabaseService');
 
 // Create Express app for health check
 const app = express();
@@ -46,52 +48,207 @@ const VOICE_CHANNELS = [
     { id: MEETING_ROOM2_CHANNEL_ID, name: 'Meeting Room 2' }
 ];
 
-// Clan member IDs
-const CLAN_MEMBERS = [
-    '1259881373309861888', // Alisha
-    '1309201554787664026', // Anitus
-    '1181238306671968256', // Archana
-    '1337604789378482228', // Arthi
-    '1097767757434597398', // Bennyhinn
-    '1344618947185606707', // Beule
-    '1187606759351799970', // Jijo
-    '1308385757576036412', // Lifnan
-    '1173582369484177470', // Ashif
-    '1344619303688998934', // Shailu
-    '1171801933158285354', // Shaniya
-    '1174295899745296438', // Lethin
-];
+// ============================================
+// SLASH COMMANDS DEFINITION
+// ============================================
+const commands = [
+    new SlashCommandBuilder()
+        .setName('points')
+        .setDescription('Check your voice activity points')
+        .addUserOption(option =>
+            option.setName('user')
+                .setDescription('Check another user\'s points (optional)')
+                .setRequired(false)),
+    new SlashCommandBuilder()
+        .setName('leaderboard')
+        .setDescription('View the voice activity leaderboard')
+        .addStringOption(option =>
+            option.setName('type')
+                .setDescription('Leaderboard type')
+                .setRequired(false)
+                .addChoices(
+                    { name: 'Monthly', value: 'monthly' },
+                    { name: 'All Time', value: 'alltime' }
+                )),
+    new SlashCommandBuilder()
+        .setName('mystats')
+        .setDescription('View your detailed voice activity statistics')
+].map(command => command.toJSON());
 
-// Birthday data
-const BIRTHDAYS = [
-    { userId: '1187606759351799970', name: 'Jijo', date: '09/01' },
-    { userId: '1344618947185606707', name: 'Beule', date: '26/03' },
-    { userId: '1181238306671968256', name: 'Archana', date: '02/04' },
-    { userId: '1097767757434597398', name: 'Bennyhinn', date: '18/04' },
-    { userId: '1174295899745296438', name: 'Lethin', date: '24/04' },
-    { userId: '1171801933158285354', name: 'Shaniya', date: '10/05' },
-    { userId: '1337604789378482228', name: 'Arthi', date: '03/07' },
-    { userId: '1344619303688998934', name: 'Shailu', date: '03/10' },
-    { userId: '1259881373309861888', name: 'Alisha', date: '18/10' },
-    { userId: '1173582369484177470', name: 'Ashif', date: '08/11' },
-    { userId: '1308385757576036412', name: 'Lifnan', date: '08/12' },
-    { userId: '1309201554787664026', name: 'Anitus', date: '11/12' }
-];
+// Helper functions to get data from Supabase
+async function getBirthdays() {
+    if (supabaseService.isSupabaseConfigured()) {
+        const dbBirthdays = await supabaseService.getBirthdays();
+        if (dbBirthdays.length > 0) {
+            return dbBirthdays.map(b => ({ userId: b.user_id, name: b.name, date: b.date }));
+        }
+    }
+    console.log('⚠️ No birthdays found in database');
+    return [];
+}
 
-// Festival data (DD/MM format)
-const FESTIVALS = [
-    { name: 'New Year', date: '01/01', emoji: '🎆', type: 'global' },
-    { name: 'Pongal', date: '14/01', emoji: '🌾', type: 'south_indian' },
-    { name: 'Maha Shivaratri', date: '26/02', emoji: '🕉️', type: 'south_indian' },
-    { name: 'Easter', date: '20/04', emoji: '✝️', type: 'global' }, // Note: Easter date varies, this is approximate
-    { name: 'Tamil New Year', date: '14/04', emoji: '🎊', type: 'south_indian' },
-    { name: 'Vishu', date: '14/04', emoji: '🌺', type: 'south_indian' },
-    { name: 'Onam', date: '15/08', emoji: '🌼', type: 'south_indian' },
-    { name: 'Ganesh Chaturthi', date: '07/09', emoji: '🐘', type: 'south_indian' },
-    { name: 'Dussehra', date: '12/10', emoji: '🏹', type: 'south_indian' },
-    { name: 'Diwali', date: '01/11', emoji: '🪔', type: 'south_indian' },
-    { name: 'Christmas', date: '25/12', emoji: '🎄', type: 'global' }
-];
+async function getFestivals() {
+    if (supabaseService.isSupabaseConfigured()) {
+        const dbFestivals = await supabaseService.getFestivals();
+        if (dbFestivals.length > 0) {
+            return dbFestivals;
+        }
+    }
+    console.log('⚠️ No festivals found in database');
+    return [];
+}
+
+/**
+ * Parse JSON from AI response (handles markdown code blocks and truncated responses)
+ */
+function parseJsonResponse(response) {
+    let jsonText = response.replace(/```json\s*/gi, '').replace(/```\s*/gi, '').trim();
+    
+    try {
+        if (jsonText.startsWith('[')) {
+            if (!jsonText.endsWith(']')) {
+                const lastCompleteIndex = jsonText.lastIndexOf('}');
+                if (lastCompleteIndex > 0) {
+                    jsonText = jsonText.substring(0, lastCompleteIndex + 1) + ']';
+                }
+            }
+            return JSON.parse(jsonText);
+        }
+        
+        const jsonMatch = jsonText.match(/\[[\s\S]*\]/);
+        if (jsonMatch) {
+            return JSON.parse(jsonMatch[0]);
+        }
+    } catch (e) {
+        console.error('JSON parse error:', e.message);
+    }
+    return null;
+}
+
+/**
+ * Use AI to fetch festival dates for a given year and store in database
+ * @param {number} year - The year to fetch festivals for
+ * @returns {Promise<boolean>} - Success status
+ */
+async function fetchAndStoreFestivals(year) {
+    console.log(`🎉 Fetching all Tamil Nadu festival dates for ${year} using AI...`);
+    
+    try {
+        // Split into two requests to avoid response truncation
+        const prompt1 = `List exact dates for these Tamil Nadu festivals in ${year}. Return ONLY JSON array, no markdown:
+1. New Year (01/01) 2. Pongal (14/01) 3. Republic Day (26/01) 4. Thaipusam 5. Maha Shivaratri 6. Holi 7. Ramadan Start 8. Good Friday 9. Easter Sunday 10. Tamil New Year (14/04) 11. Eid ul-Fitr 12. Akshaya Tritiya 13. Vaigasi Visakam
+Format: [{"name":"..","date":"DD/MM","emoji":"🎉","type":"hindu/muslim/christian/global"}]
+Use: 🌾Pongal 🕉️Hindu 🌙Muslim ✝️Christian 🎆NewYear 🇮🇳National`;
+
+        const prompt2 = `List exact dates for these Tamil Nadu festivals in ${year}. Return ONLY JSON array, no markdown:
+1. Eid ul-Adha 2. Muharram 3. Independence Day (15/08) 4. Aadi Perukku 5. Onam 6. Krishna Jayanthi 7. Vinayagar Chaturthi 8. Milad-un-Nabi 9. Navaratri Start 10. Ayudha Puja 11. Dussehra 12. Diwali 13. Karthigai Deepam 14. Christmas (25/12)
+Format: [{"name":"..","date":"DD/MM","emoji":"🎉","type":"hindu/muslim/christian/global"}]
+Use: 🪔Diwali 🐘Ganesh 🏹Dussehra 🔥Karthigai 🌙Muslim 🌼Onam 🎄Christmas 🇮🇳National`;
+
+        console.log('📡 Fetching Part 1 (Jan-Jun)...');
+        const response1 = await aiService.askQuestion(prompt1);
+        const festivals1 = parseJsonResponse(response1) || [];
+        console.log(`   Got ${festivals1.length} festivals`);
+        
+        console.log('📡 Fetching Part 2 (Jul-Dec)...');
+        const response2 = await aiService.askQuestion(prompt2);
+        const festivals2 = parseJsonResponse(response2) || [];
+        console.log(`   Got ${festivals2.length} festivals`);
+        
+        const festivals = [...festivals1, ...festivals2];
+        
+        if (festivals.length === 0) {
+            console.error('❌ No festival data received');
+            return false;
+        }
+        
+        // Clear existing festivals for the year and add new ones
+        console.log(`📝 Storing ${festivals.length} festivals for ${year}...`);
+        
+        // Delete existing festivals
+        await supabaseService.clearFestivals();
+        
+        // Add new festivals
+        for (const festival of festivals) {
+            if (festival.name && festival.date) {
+                await supabaseService.addFestival(
+                    festival.name,
+                    festival.date,
+                    festival.emoji || '🎉',
+                    festival.type || 'global'
+                );
+                console.log(`   ✅ ${festival.emoji || '🎉'} ${festival.name} - ${festival.date}`);
+            }
+        }
+        
+        // Log the update
+        await supabaseService.logFestivalUpdate(year, festivals.length);
+        
+        console.log(`✅ Successfully updated festivals for ${year}`);
+        return true;
+    } catch (error) {
+        console.error('❌ Error fetching festivals:', error.message);
+        return false;
+    }
+}
+
+/**
+ * Verify festival date with AI before posting (for lunar calendar festivals that may shift)
+ * @param {Object} festival - Festival object with name and date
+ * @param {string} today - Today's date in DD/MM format
+ * @returns {Promise<{isToday: boolean, correctDate: string|null}>}
+ */
+async function verifyFestivalDate(festival, today) {
+    const year = new Date().getFullYear();
+    
+    // Skip verification for fixed-date festivals
+    const fixedDateFestivals = ['New Year', 'Republic Day', 'Independence Day', 'Christmas', 'Tamil New Year', 'Puthandu', 'Pongal'];
+    if (fixedDateFestivals.some(f => festival.name.toLowerCase().includes(f.toLowerCase()))) {
+        return { isToday: festival.date === today, correctDate: null };
+    }
+    
+    try {
+        const prompt = `What is the exact date of ${festival.name} in ${year}? 
+This is important for sending festival greetings.
+Today's date is ${today}/${year} (DD/MM/YYYY format).
+
+Return ONLY a JSON object like this, nothing else:
+{"festivalName":"${festival.name}","correctDate":"DD/MM","isToday":true/false}
+
+If the festival is today, set isToday to true. Use DD/MM format for correctDate.`;
+
+        const response = await aiService.askQuestion(prompt);
+        
+        // Parse response
+        const jsonMatch = response.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+            const result = JSON.parse(jsonMatch[0]);
+            return {
+                isToday: result.isToday === true,
+                correctDate: result.correctDate || null
+            };
+        }
+    } catch (error) {
+        console.error(`❌ Error verifying ${festival.name} date:`, error.message);
+    }
+    
+    // Fallback to stored date
+    return { isToday: festival.date === today, correctDate: null };
+}
+
+/**
+ * Update a single festival's date in the database
+ * @param {string} festivalName - Name of the festival
+ * @param {string} newDate - New date in DD/MM format
+ */
+async function updateFestivalDate(festivalName, newDate) {
+    try {
+        await supabaseService.updateFestivalByName(festivalName, { date: newDate });
+        console.log(`📅 Updated ${festivalName} date to ${newDate}`);
+    } catch (error) {
+        console.error(`❌ Error updating ${festivalName} date:`, error.message);
+    }
+}
 
 // Bot status tracking
 let botStatus = {
@@ -104,6 +261,10 @@ let botStatus = {
 // Voice channel meeting tracking
 const voiceMeetings = new Map(); // channelId -> { startTime, participants: Map(userId -> joinTime), lastActivity }
 const MINIMUM_MEETING_DURATION = 10 * 60 * 1000; // 10 minutes in milliseconds
+
+// Voice points tracking (1 point per 5 minutes)
+const voicePointsTracking = new Map(); // discordUserId -> { joinedAt, channelId, channelName, lastPointsAwarded }
+const POINTS_INTERVAL = 5 * 60 * 1000; // 5 minutes in milliseconds
 
 // Scheduled meetings tracking
 const scheduledMeetings = new Map(); // meetingId -> { time, topic, channelId, timeoutId, creatorId, confirmationMsg, startTime, endTime, date, status }
@@ -947,6 +1108,19 @@ client.once(Events.ClientReady, async (c) => {
     botStatus.isOnline = true;
     botStatus.connectedAt = new Date().toISOString();
 
+    // Register slash commands
+    try {
+        console.log('Registering slash commands...');
+        const rest = new REST({ version: '10' }).setToken(BOT_TOKEN);
+        await rest.put(
+            Routes.applicationCommands(c.user.id),
+            { body: commands }
+        );
+        console.log('✅ Slash commands registered successfully!');
+    } catch (error) {
+        console.error('Error registering slash commands:', error);
+    }
+
     // Schedule daily update at 9:00 PM IST (21:00)
     // Cron format: minute hour * * *
     // 0 21 * * * means every day at 21:00 (9:00 PM) IST
@@ -971,8 +1145,9 @@ client.once(Events.ClientReady, async (c) => {
         const month = (now.getMonth() + 1).toString().padStart(2, '0');
         const today = `${day}/${month}`; // DD/MM format
         
-        // Find today's birthdays
-        const todaysBirthdays = BIRTHDAYS.filter(b => b.date === today);
+        // Find today's birthdays from Supabase
+        const allBirthdays = await getBirthdays();
+        const todaysBirthdays = allBirthdays.filter(b => b.date === today);
         
         if (todaysBirthdays.length > 0) {
             const channel = await client.channels.fetch(CHANNEL_ID);
@@ -1016,18 +1191,59 @@ client.once(Events.ClientReady, async (c) => {
         const month = (now.getMonth() + 1).toString().padStart(2, '0');
         const today = `${day}/${month}`; // DD/MM format
         
-        // Find today's festivals
-        const todaysFestivals = FESTIVALS.filter(f => f.date === today);
+        // Find today's festivals from Supabase
+        const allFestivals = await getFestivals();
+        let todaysFestivals = allFestivals.filter(f => f.date === today);
+        
+        // Also check if any lunar calendar festivals (Muslim/Hindu) should be today
+        // by verifying with AI for festivals that might have shifted
+        const lunarFestivals = allFestivals.filter(f => 
+            f.type === 'muslim' || 
+            ['Diwali', 'Dussehra', 'Ganesh', 'Navaratri', 'Shivaratri', 'Eid', 'Ramadan', 'Muharram', 'Milad', 'Onam', 'Thaipusam', 'Janmashtami', 'Krishna'].some(
+                name => f.name.toLowerCase().includes(name.toLowerCase())
+            )
+        );
+        
+        // Verify lunar calendar festivals
+        for (const festival of lunarFestivals) {
+            if (!todaysFestivals.find(f => f.name === festival.name)) {
+                console.log(`🔍 Verifying date for ${festival.name}...`);
+                const verification = await verifyFestivalDate(festival, today);
+                
+                if (verification.isToday) {
+                    console.log(`✅ AI confirmed ${festival.name} is today!`);
+                    todaysFestivals.push(festival);
+                    
+                    // Update the date in database if it was different
+                    if (verification.correctDate && verification.correctDate !== festival.date) {
+                        await updateFestivalDate(festival.name, verification.correctDate);
+                    }
+                } else if (verification.correctDate && verification.correctDate !== festival.date) {
+                    // Update incorrect date in database for future reference
+                    console.log(`📅 Updating ${festival.name} date from ${festival.date} to ${verification.correctDate}`);
+                    await updateFestivalDate(festival.name, verification.correctDate);
+                }
+            }
+        }
         
         if (todaysFestivals.length > 0) {
             const channel = await client.channels.fetch(CHANNEL_ID);
             
             for (const festival of todaysFestivals) {
                 try {
-                    // Generate AI festival wish
+                    // Generate AI festival wish based on festival type
+                    let festivalContext = '';
+                    if (festival.type === 'muslim') {
+                        festivalContext = 'This is an Islamic festival. Include appropriate Islamic greetings and blessings. ';
+                    } else if (festival.type === 'christian') {
+                        festivalContext = 'This is a Christian festival. Include appropriate Christian blessings. ';
+                    } else if (festival.type === 'hindu') {
+                        festivalContext = 'This is a Hindu festival celebrated in Tamil Nadu. Include cultural significance and traditional Tamil/Sanskrit greetings. ';
+                    }
+                    
                     const festivalWish = await aiService.askQuestion(
                         `Generate a warm and festive greeting for ${festival.name}. ` +
-                        `${festival.type === 'south_indian' ? 'This is a South Indian festival, so include cultural significance and traditional greetings. ' : ''}` +
+                        festivalContext +
                         `Include meaningful wishes and the cultural significance of the day. ` +
                         `Make it joyful, inspiring, and celebratory. ` +
                         `Keep it under 150 words. Format it beautifully. ` +
@@ -1047,12 +1263,131 @@ client.once(Events.ClientReady, async (c) => {
                     console.error(`Error posting festival wish for ${festival.name}:`, error);
                 }
             }
+        } else {
+            console.log(`No festivals today (${today})`);
         }
     }, {
         timezone: 'Asia/Kolkata'
     });
     
     console.log('Festival checker started - will check daily at 8:00 AM IST');
+    
+    // Schedule database heartbeat (runs every 6 hours to keep Supabase active)
+    cron.schedule('0 */6 * * *', async () => {
+        console.log('Writing database heartbeat...');
+        await supabaseService.writeHeartbeat();
+    }, {
+        timezone: 'Asia/Kolkata'
+    });
+    
+    console.log('Database heartbeat scheduler started - will ping every 6 hours');
+    
+    // Schedule yearly festival update (runs on January 2nd at 6:00 AM IST)
+    cron.schedule('0 6 2 1 *', async () => {
+        const year = new Date().getFullYear();
+        console.log(`🎉 Running yearly festival update for ${year}...`);
+        await fetchAndStoreFestivals(year);
+    }, {
+        timezone: 'Asia/Kolkata'
+    });
+    
+    console.log('Yearly festival updater scheduled - will run on January 2nd');
+    
+    // Schedule monthly voice leaderboard (runs on 1st of each month at 7:00 AM IST)
+    cron.schedule('0 7 1 * *', async () => {
+        console.log('📊 Posting monthly voice activity leaderboard...');
+        try {
+            const now = getISTTime();
+            // Get previous month's data
+            const prevMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+            const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 
+                               'July', 'August', 'September', 'October', 'November', 'December'];
+            const monthName = monthNames[prevMonth.getMonth()];
+            const year = prevMonth.getFullYear();
+            
+            const leaderboard = await supabaseService.getMonthlyLeaderboard(10, prevMonth.getMonth() + 1, year);
+            
+            if (leaderboard && leaderboard.length > 0) {
+                const channel = await client.channels.fetch(CHANNEL_ID);
+                
+                const medals = ['🥇', '🥈', '🥉'];
+                let leaderboardText = '';
+                
+                leaderboard.forEach((entry, index) => {
+                    const medal = medals[index] || `**${index + 1}.**`;
+                    const hours = Math.floor(entry.total_minutes / 60);
+                    const mins = entry.total_minutes % 60;
+                    leaderboardText += `${medal} **${entry.username}** - ${entry.total_points} points (${hours}h ${mins}m)\n`;
+                });
+                
+                const leaderboardMessage = 
+                    `📊 **VOICE ACTIVITY LEADERBOARD** 📊\n` +
+                    `**${monthName} ${year}**\n\n` +
+                    `<@&${CLAN_ROLE_ID}>\n\n` +
+                    `${leaderboardText}\n` +
+                    `🎯 _1 point earned for every 5 minutes of voice activity!_\n\n` +
+                    `Congratulations to our most active voice chat members! 🎉`;
+                
+                await channel.send(leaderboardMessage);
+                console.log('✅ Posted monthly voice leaderboard');
+            } else {
+                console.log('No voice activity data for the previous month');
+            }
+        } catch (error) {
+            console.error('Error posting monthly leaderboard:', error);
+        }
+    }, {
+        timezone: 'Asia/Kolkata'
+    });
+    
+    console.log('Monthly leaderboard scheduler started - will post on 1st of each month at 7:00 AM IST');
+    
+    // Start periodic voice points checker (every 5 minutes)
+    setInterval(async () => {
+        const now = Date.now();
+        for (const [userId, tracking] of voicePointsTracking.entries()) {
+            const timeSinceLastPoints = now - tracking.lastPointsAwarded;
+            const intervalsElapsed = Math.floor(timeSinceLastPoints / POINTS_INTERVAL);
+            
+            if (intervalsElapsed > 0) {
+                try {
+                    // Award points for elapsed intervals
+                    const pointsToAward = intervalsElapsed;
+                    const minutesToAdd = intervalsElapsed * 5;
+                    
+                    await supabaseService.addVoicePoints(userId, tracking.username, pointsToAward, minutesToAdd);
+                    
+                    // Update tracking
+                    tracking.lastPointsAwarded = now;
+                    
+                    console.log(`🎯 Periodic: ${tracking.username} earned ${pointsToAward} points in ${tracking.channelName}`);
+                } catch (error) {
+                    console.error(`Error awarding periodic points to ${tracking.username}:`, error);
+                }
+            }
+        }
+    }, POINTS_INTERVAL);
+    
+    console.log('Voice points tracker started - checking every 5 minutes');
+    
+    // Write initial heartbeat on startup
+    setTimeout(async () => {
+        console.log('Writing startup heartbeat to database...');
+        await supabaseService.writeHeartbeat();
+    }, 3000);
+    
+    // Check if festivals need to be updated on startup
+    setTimeout(async () => {
+        const currentYear = new Date().getFullYear();
+        const lastUpdate = await supabaseService.getLastFestivalUpdate();
+        
+        if (!lastUpdate || lastUpdate.year < currentYear) {
+            console.log(`🎉 Festivals need update for ${currentYear}. Fetching...`);
+            await fetchAndStoreFestivals(currentYear);
+        } else {
+            console.log(`✅ Festivals already updated for ${currentYear}`);
+        }
+    }, 5000);
     
     // Check birthdays on bot startup (backup in case bot started after 7 AM)
     setTimeout(async () => {
@@ -1063,7 +1398,9 @@ client.once(Events.ClientReady, async (c) => {
         const month = (now.getMonth() + 1).toString().padStart(2, '0');
         const today = `${day}/${month}`; // DD/MM format
         
-        const todaysBirthdays = BIRTHDAYS.filter(b => b.date === today);
+        // Fetch birthdays from Supabase
+        const allBirthdays = await getBirthdays();
+        const todaysBirthdays = allBirthdays.filter(b => b.date === today);
         
         if (todaysBirthdays.length > 0) {
             const channel = await client.channels.fetch(CHANNEL_ID);
@@ -1103,16 +1440,47 @@ client.once(Events.ClientReady, async (c) => {
         const month = (now.getMonth() + 1).toString().padStart(2, '0');
         const today = `${day}/${month}`; // DD/MM format
         
-        const todaysFestivals = FESTIVALS.filter(f => f.date === today);
+        // Fetch festivals from Supabase
+        const allFestivals = await getFestivals();
+        let todaysFestivals = allFestivals.filter(f => f.date === today);
+        
+        // Verify lunar calendar festivals with AI on startup too
+        const lunarFestivals = allFestivals.filter(f => 
+            f.type === 'muslim' || 
+            ['Diwali', 'Dussehra', 'Ganesh', 'Navaratri', 'Shivaratri', 'Eid', 'Ramadan', 'Muharram', 'Milad', 'Onam', 'Thaipusam', 'Janmashtami', 'Krishna'].some(
+                name => f.name.toLowerCase().includes(name.toLowerCase())
+            )
+        );
+        
+        for (const festival of lunarFestivals) {
+            if (!todaysFestivals.find(f => f.name === festival.name)) {
+                const verification = await verifyFestivalDate(festival, today);
+                if (verification.isToday) {
+                    todaysFestivals.push(festival);
+                    if (verification.correctDate && verification.correctDate !== festival.date) {
+                        await updateFestivalDate(festival.name, verification.correctDate);
+                    }
+                }
+            }
+        }
         
         if (todaysFestivals.length > 0) {
             const channel = await client.channels.fetch(CHANNEL_ID);
             
             for (const festival of todaysFestivals) {
                 try {
+                    let festivalContext = '';
+                    if (festival.type === 'muslim') {
+                        festivalContext = 'This is an Islamic festival. Include appropriate Islamic greetings and blessings. ';
+                    } else if (festival.type === 'christian') {
+                        festivalContext = 'This is a Christian festival. Include appropriate Christian blessings. ';
+                    } else if (festival.type === 'hindu') {
+                        festivalContext = 'This is a Hindu festival celebrated in Tamil Nadu. Include cultural significance and traditional Tamil/Sanskrit greetings. ';
+                    }
+                    
                     const festivalWish = await aiService.askQuestion(
                         `Generate a warm and festive greeting for ${festival.name}. ` +
-                        `${festival.type === 'south_indian' ? 'This is a South Indian festival, so include cultural significance and traditional greetings. ' : ''}` +
+                        festivalContext +
                         `Include meaningful wishes and the cultural significance of the day. ` +
                         `Make it joyful, inspiring, and celebratory. ` +
                         `Keep it under 150 words. Format it beautifully. ` +
@@ -1249,6 +1617,165 @@ client.once(Events.ClientReady, async (c) => {
 // Handle button and modal interactions
 client.on(Events.InteractionCreate, async (interaction) => {
     try {
+        // ===== SLASH COMMANDS HANDLER =====
+        if (interaction.isChatInputCommand()) {
+            const { commandName, options } = interaction;
+            
+            // /points command
+            if (commandName === 'points') {
+                const targetUser = options.getUser('user') || interaction.user;
+                const now = getISTTime();
+                const monthYear = `${(now.getMonth() + 1).toString().padStart(2, '0')}/${now.getFullYear()}`;
+                
+                try {
+                    const monthlyPoints = await supabaseService.getUserVoicePoints(targetUser.id, monthYear);
+                    const allTimePoints = await supabaseService.getUserAllTimePoints(targetUser.id);
+                    
+                    const isOwnPoints = targetUser.id === interaction.user.id;
+                    const possessive = isOwnPoints ? 'Your' : `${targetUser.username}'s`;
+                    
+                    const monthHours = Math.floor((monthlyPoints?.total_minutes || 0) / 60);
+                    const monthMins = (monthlyPoints?.total_minutes || 0) % 60;
+                    const allTimeHours = Math.floor((allTimePoints?.total_minutes || 0) / 60);
+                    const allTimeMins = (allTimePoints?.total_minutes || 0) % 60;
+                    
+                    const embed = {
+                        color: 0x5865F2,
+                        title: `🎯 ${possessive} Voice Points`,
+                        fields: [
+                            {
+                                name: '📅 This Month',
+                                value: `**${monthlyPoints?.total_points || 0}** points\n⏱️ ${monthHours}h ${monthMins}m voice time`,
+                                inline: true
+                            },
+                            {
+                                name: '🏆 All Time',
+                                value: `**${allTimePoints?.total_points || 0}** points\n⏱️ ${allTimeHours}h ${allTimeMins}m voice time`,
+                                inline: true
+                            }
+                        ],
+                        footer: { text: '1 point = 5 minutes of voice activity' }
+                    };
+                    
+                    await interaction.reply({ embeds: [embed] });
+                } catch (error) {
+                    console.error('Error fetching points:', error);
+                    await interaction.reply({ content: '❌ Error fetching points data.', flags: MessageFlags.Ephemeral });
+                }
+                return;
+            }
+            
+            // /leaderboard command
+            if (commandName === 'leaderboard') {
+                const type = options.getString('type') || 'monthly';
+                
+                try {
+                    let leaderboard;
+                    let title;
+                    
+                    if (type === 'alltime') {
+                        leaderboard = await supabaseService.getAllTimeLeaderboard(10);
+                        title = '🏆 All-Time Voice Activity Leaderboard';
+                    } else {
+                        const now = getISTTime();
+                        leaderboard = await supabaseService.getMonthlyLeaderboard(10, now.getMonth() + 1, now.getFullYear());
+                        const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 
+                                           'July', 'August', 'September', 'October', 'November', 'December'];
+                        title = `📊 ${monthNames[now.getMonth()]} ${now.getFullYear()} Voice Leaderboard`;
+                    }
+                    
+                    if (!leaderboard || leaderboard.length === 0) {
+                        await interaction.reply({ content: '📊 No voice activity data yet!', flags: MessageFlags.Ephemeral });
+                        return;
+                    }
+                    
+                    const medals = ['🥇', '🥈', '🥉'];
+                    let leaderboardText = '';
+                    
+                    leaderboard.forEach((entry, index) => {
+                        const medal = medals[index] || `**${index + 1}.**`;
+                        const hours = Math.floor(entry.total_minutes / 60);
+                        const mins = entry.total_minutes % 60;
+                        leaderboardText += `${medal} **${entry.username}** - ${entry.total_points} pts (${hours}h ${mins}m)\n`;
+                    });
+                    
+                    const embed = {
+                        color: 0xFFD700,
+                        title: title,
+                        description: leaderboardText,
+                        footer: { text: '1 point = 5 minutes of voice activity' }
+                    };
+                    
+                    await interaction.reply({ embeds: [embed] });
+                } catch (error) {
+                    console.error('Error fetching leaderboard:', error);
+                    await interaction.reply({ content: '❌ Error fetching leaderboard.', flags: MessageFlags.Ephemeral });
+                }
+                return;
+            }
+            
+            // /mystats command
+            if (commandName === 'mystats') {
+                try {
+                    const userId = interaction.user.id;
+                    const now = getISTTime();
+                    const monthYear = `${(now.getMonth() + 1).toString().padStart(2, '0')}/${now.getFullYear()}`;
+                    
+                    const monthlyPoints = await supabaseService.getUserVoicePoints(userId, monthYear);
+                    const allTimePoints = await supabaseService.getUserAllTimePoints(userId);
+                    const recentSessions = await supabaseService.getUserVoiceSessions(userId, 5);
+                    const monthlyRank = await supabaseService.getMonthlyLeaderboard(100, now.getMonth() + 1, now.getFullYear());
+                    
+                    // Find user's rank
+                    const userRankIndex = monthlyRank.findIndex(e => e.discord_user_id === userId);
+                    const userRank = userRankIndex !== -1 ? userRankIndex + 1 : 'N/A';
+                    
+                    const monthHours = Math.floor((monthlyPoints?.total_minutes || 0) / 60);
+                    const monthMins = (monthlyPoints?.total_minutes || 0) % 60;
+                    const allTimeHours = Math.floor((allTimePoints?.total_minutes || 0) / 60);
+                    const allTimeMins = (allTimePoints?.total_minutes || 0) % 60;
+                    
+                    // Format recent sessions
+                    let sessionsText = 'No recent sessions';
+                    if (recentSessions && recentSessions.length > 0) {
+                        sessionsText = recentSessions.map(s => {
+                            const date = new Date(s.session_date).toLocaleDateString('en-IN');
+                            return `📍 ${s.channel_name || 'Voice'} - ${s.duration_minutes}m (+${s.points_earned} pts) - ${date}`;
+                        }).join('\n');
+                    }
+                    
+                    const embed = {
+                        color: 0x5865F2,
+                        title: `📊 ${interaction.user.username}'s Voice Stats`,
+                        fields: [
+                            {
+                                name: '📅 This Month',
+                                value: `🎯 **${monthlyPoints?.total_points || 0}** points\n⏱️ ${monthHours}h ${monthMins}m\n🏅 Rank: #${userRank}`,
+                                inline: true
+                            },
+                            {
+                                name: '🏆 All Time',
+                                value: `🎯 **${allTimePoints?.total_points || 0}** points\n⏱️ ${allTimeHours}h ${allTimeMins}m`,
+                                inline: true
+                            },
+                            {
+                                name: '📜 Recent Sessions',
+                                value: sessionsText,
+                                inline: false
+                            }
+                        ],
+                        footer: { text: '1 point = 5 minutes of voice activity' }
+                    };
+                    
+                    await interaction.reply({ embeds: [embed] });
+                } catch (error) {
+                    console.error('Error fetching stats:', error);
+                    await interaction.reply({ content: '❌ Error fetching your stats.', flags: MessageFlags.Ephemeral });
+                }
+                return;
+            }
+        }
+        
         // Handle button clicks
         if (interaction.isButton()) {
             
@@ -2587,7 +3114,9 @@ client.on(Events.MessageCreate, async (message) => {
         
         console.log(`Current IST Date: ${today}`);
         
-        const todaysBirthdays = BIRTHDAYS.filter(b => b.date === today);
+        // Fetch birthdays from Supabase
+        const allBirthdays = await getBirthdays();
+        const todaysBirthdays = allBirthdays.filter(b => b.date === today);
         
         if (todaysBirthdays.length > 0) {
             await message.reply(`Found ${todaysBirthdays.length} birthday(s) today (${today}): ${todaysBirthdays.map(b => b.name).join(', ')}\nPosting wishes...`);
@@ -2617,7 +3146,7 @@ client.on(Events.MessageCreate, async (message) => {
                 }
             }
         } else {
-            await message.reply(`No birthdays found for today (${today}). Available birthdays: ${BIRTHDAYS.map(b => `${b.name} - ${b.date}`).join(', ')}`);
+            await message.reply(`No birthdays found for today (${today}). Available birthdays: ${allBirthdays.map(b => `${b.name} - ${b.date}`).join(', ')}`);
         }
     }
     
@@ -2768,7 +3297,25 @@ async function handleVoiceJoin(userId, channel) {
     const channelId = channel.id;
     const now = Date.now();
     
-    // Only track the lounge voice channel
+    // Fetch user info first
+    const user = await client.users.fetch(userId).catch(() => null);
+    if (!user || user.bot) return; // Ignore bots
+    const username = user.username;
+    
+    // ===== VOICE POINTS TRACKING (ALL CHANNELS) =====
+    if (!voicePointsTracking.has(userId)) {
+        voicePointsTracking.set(userId, {
+            joinedAt: now,
+            channelId: channelId,
+            channelName: channel.name,
+            username: username,
+            lastPointsAwarded: now
+        });
+        console.log(`🎯 Started tracking points for ${username} in ${channel.name}`);
+    }
+    
+    // ===== LOUNGE MEETING TRACKING (ORIGINAL) =====
+    // Only track the lounge voice channel for meeting summaries
     if (channelId !== LOUNGE_VOICE_CHANNEL_ID) return;
     
     if (!voiceMeetings.has(channelId)) {
@@ -2783,10 +3330,6 @@ async function handleVoiceJoin(userId, channel) {
     }
     
     const meeting = voiceMeetings.get(channelId);
-    
-    // Fetch username
-    const user = await client.users.fetch(userId).catch(() => null);
-    const username = user ? user.username : `User ${userId}`;
     
     if (!meeting.participants.has(userId)) {
         meeting.participants.set(userId, {
@@ -2811,7 +3354,36 @@ async function handleVoiceLeave(userId, channel) {
     const channelId = channel.id;
     const now = Date.now();
     
-    // Only track the lounge voice channel
+    // Fetch user info
+    const user = await client.users.fetch(userId).catch(() => null);
+    if (!user || user.bot) return; // Ignore bots
+    
+    // ===== VOICE POINTS TRACKING (ALL CHANNELS) =====
+    if (voicePointsTracking.has(userId)) {
+        const tracking = voicePointsTracking.get(userId);
+        const totalTimeMs = now - tracking.joinedAt;
+        const totalMinutes = Math.floor(totalTimeMs / (1000 * 60));
+        const pointsEarned = Math.floor(totalMinutes / 5); // 1 point per 5 minutes
+        
+        if (pointsEarned > 0) {
+            try {
+                // Add points to database
+                await supabaseService.addVoicePoints(userId, tracking.username, pointsEarned, totalMinutes);
+                // Log the session
+                await supabaseService.logVoiceSession(userId, tracking.username, tracking.channelId, tracking.channelName, totalMinutes, pointsEarned);
+                console.log(`🎯 ${tracking.username} earned ${pointsEarned} points for ${totalMinutes} minutes in ${tracking.channelName}`);
+            } catch (error) {
+                console.error('Error saving voice points:', error);
+            }
+        } else {
+            console.log(`🎯 ${tracking.username} left after ${totalMinutes} minutes (no points - less than 5 min)`);
+        }
+        
+        voicePointsTracking.delete(userId);
+    }
+    
+    // ===== LOUNGE MEETING TRACKING (ORIGINAL) =====
+    // Only track the lounge voice channel for meeting summaries
     if (channelId !== LOUNGE_VOICE_CHANNEL_ID) return;
     
     if (!voiceMeetings.has(channelId)) return;
