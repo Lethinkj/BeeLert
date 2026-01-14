@@ -1232,16 +1232,15 @@ client.once(Events.ClientReady, async (c) => {
                 console.log(`🔍 Verifying date for ${festival.name}...`);
                 const verification = await verifyFestivalDate(festival, today);
                 
-                if (verification.isToday) {
+                // Only add to today's festivals if AI confirms AND date matches today
+                // If AI returns a different correctDate, the festival is NOT today
+                if (verification.isToday && (!verification.correctDate || verification.correctDate === today)) {
                     console.log(`✅ AI confirmed ${festival.name} is today!`);
                     todaysFestivals.push(festival);
-                    
-                    // Update the date in database if it was different
-                    if (verification.correctDate && verification.correctDate !== festival.date) {
-                        await updateFestivalDate(festival.name, verification.correctDate);
-                    }
-                } else if (verification.correctDate && verification.correctDate !== festival.date) {
-                    // Update incorrect date in database for future reference
+                }
+                
+                // Update the stored date if AI provides a correction (for future reference)
+                if (verification.correctDate && verification.correctDate !== festival.date) {
                     console.log(`📅 Updating ${festival.name} date from ${festival.date} to ${verification.correctDate}`);
                     await updateFestivalDate(festival.name, verification.correctDate);
                 }
@@ -1430,11 +1429,16 @@ client.once(Events.ClientReady, async (c) => {
         for (const festival of lunarFestivals) {
             if (!todaysFestivals.find(f => f.name === festival.name)) {
                 const verification = await verifyFestivalDate(festival, today);
-                if (verification.isToday) {
+                
+                // Only add to today's festivals if AI confirms it's today AND the date matches
+                // If AI returns a different correctDate, it means the festival is NOT today
+                if (verification.isToday && (!verification.correctDate || verification.correctDate === today)) {
                     todaysFestivals.push(festival);
-                    if (verification.correctDate && verification.correctDate !== festival.date) {
-                        await updateFestivalDate(festival.name, verification.correctDate);
-                    }
+                }
+                
+                // Update the stored date if AI provides a correction (regardless of whether it's today)
+                if (verification.correctDate && verification.correctDate !== festival.date) {
+                    await updateFestivalDate(festival.name, verification.correctDate);
                 }
             }
         }
