@@ -21,6 +21,7 @@ const client = new Client({
         GatewayIntentBits.GuildVoiceStates,
         GatewayIntentBits.DirectMessages,
         GatewayIntentBits.GuildScheduledEvents,
+        GatewayIntentBits.GuildMembers,
     ],
     partials: [Partials.Channel]
 });
@@ -38,6 +39,8 @@ const MEETING_SUMMARY_CHANNEL_ID = process.env.MEETING_SUMMARY_CHANNEL_ID || '14
 const SCHEDULE_MEET_CHANNEL_ID = process.env.SCHEDULE_MEET_CHANNEL_ID || '1443135153185493033';
 const ROLE_NAME = process.env.ROLE_NAME || 'Basher';
 const CLAN_ROLE_ID = process.env.CLAN_ROLE_ID || '1350325011826868305';
+const GUEST_ROLE_ID = process.env.GUEST_ROLE_ID || '1438467762929537076';
+const WELCOME_CHANNEL_ID = process.env.WELCOME_CHANNEL_ID || '1438532221697921106';
 const UPDATES_CHANNEL_ID = process.env.UPDATES_CHANNEL_ID || MEETING_SUMMARY_CHANNEL_ID;
 
 // Available voice channels for scheduled meetings
@@ -1590,6 +1593,47 @@ client.once(Events.ClientReady, async (c) => {
         console.log('📅 Meeting Manager interface posted in schedule channel');
     } catch (error) {
         console.error('Error posting meeting manager:', error);
+    }
+});
+
+// Handle new member joins - assign guest role automatically
+client.on(Events.GuildMemberAdd, async (member) => {
+    console.log(`👋 New member joined: ${member.user.tag}`);
+    
+    try {
+        const guild = member.guild;
+        
+        // Assign guest role
+        if (GUEST_ROLE_ID) {
+            const guestRole = guild.roles.cache.get(GUEST_ROLE_ID);
+            if (guestRole) {
+                await member.roles.add(guestRole);
+                console.log(`✅ Assigned guest role "${guestRole.name}" to ${member.user.tag}`);
+            } else {
+                console.error(`❌ Guest role with ID ${GUEST_ROLE_ID} not found in server.`);
+            }
+        }
+        
+        // Send welcome message
+        if (WELCOME_CHANNEL_ID) {
+            const welcomeChannel = await client.channels.fetch(WELCOME_CHANNEL_ID);
+            if (welcomeChannel) {
+                const welcomeMessage = 
+                    `🎉 **Welcome to the Aura-7F Fam!** 🎉\n\n` +
+                    `Hey ${member}! 👋\n\n` +
+                    `We're super excited to have you here! Make yourself at home, ` +
+                    `introduce yourself, and feel free to explore our community. ` +
+                    `If you have any questions, don't hesitate to ask!\n\n` +
+                    `Enjoy your stay! 💙`;
+                
+                await welcomeChannel.send(welcomeMessage);
+                console.log(`✅ Sent welcome message for ${member.user.tag}`);
+            } else {
+                console.error(`❌ Welcome channel with ID ${WELCOME_CHANNEL_ID} not found.`);
+            }
+        }
+    } catch (error) {
+        console.error(`❌ Error handling new member ${member.user.tag}:`, error);
     }
 });
 
