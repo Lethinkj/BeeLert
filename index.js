@@ -215,15 +215,15 @@ async function verifyFestivalDate(festival, today, year) {
         const prompt = `What is the EXACT date of ${festival.name} in the year ${year}?
 
 IMPORTANT: I need the accurate date for this specific year (${year}).
-- For Islamic festivals like Eid ul-Fitr, Eid ul-Adha, Muharram, Milad-un-Nabi: These follow the Islamic lunar calendar and shift each year.
+- For Islamic festivals like Eid ul-Fitr, Eid ul-Adha, Muharram, Milad-un-Nabi: These follow the Islamic lunar calendar and shift approximately 10-11 days earlier each Gregorian year.
 - For Hindu lunar festivals like Diwali, Dussehra, Navaratri: These follow the Hindu lunar calendar.
 
-Return ONLY a JSON object with the correct date in DD/MM format:
-{"festivalName":"${festival.name}","correctDate":"DD/MM"}
+Return ONLY a JSON object with the ACTUAL date (day and month as numbers):
+{"festivalName":"${festival.name}","correctDate":"06/06"}
 
-Example: {"festivalName":"Eid ul-Fitr","correctDate":"30/03"}
+The correctDate MUST be the actual numeric date like "06/06" or "15/09" - NOT the literal text "DD/MM".
 
-Do NOT include any other text, explanation, or markdown. Just the JSON object.`;
+Do NOT include any other text, explanation, or markdown. Just the JSON object with real numbers.`;
 
         const response = await aiService.askQuestion(prompt);
         
@@ -1251,15 +1251,21 @@ client.once(Events.ClientReady, async (c) => {
             console.log(`🔍 Verifying stored date for ${festival.name} (stored: ${festival.date})...`);
             const verification = await verifyFestivalDate(festival, today, year);
             
-            // If AI says the correct date is different from today, remove this festival
-            if (verification.correctDate && verification.correctDate !== today) {
-                console.log(`❌ ${festival.name} is NOT today. AI says correct date is ${verification.correctDate}`);
+            // Validate that AI returned a real date format (DD/MM), not literal text
+            if (verification.correctDate && /^\d{2}\/\d{2}$/.test(verification.correctDate)) {
+                // If AI says the correct date is different from today, remove this festival
+                if (verification.correctDate !== today) {
+                    console.log(`❌ ${festival.name} is NOT today. AI says correct date is ${verification.correctDate}`);
+                    todaysFestivals = todaysFestivals.filter(f => f.name !== festival.name);
+                    
+                    // Update the stored date for future reference
+                    await updateFestivalDate(festival.name, verification.correctDate);
+                } else {
+                    console.log(`✅ Confirmed: ${festival.name} is today!`);
+                }
+            } else {
+                console.log(`⚠️ AI returned invalid date for ${festival.name}: ${verification.correctDate} - removing to be safe`);
                 todaysFestivals = todaysFestivals.filter(f => f.name !== festival.name);
-                
-                // Update the stored date for future reference
-                await updateFestivalDate(festival.name, verification.correctDate);
-            } else if (verification.isToday) {
-                console.log(`✅ Confirmed: ${festival.name} is today!`);
             }
         }
         
@@ -1270,17 +1276,20 @@ client.once(Events.ClientReady, async (c) => {
                 console.log(`🔍 Checking if ${festival.name} (stored: ${festival.date}) might be today...`);
                 const verification = await verifyFestivalDate(festival, today, year);
                 
-                // Only add if AI confirms the correct date IS today
-                if (verification.isToday && verification.correctDate === today) {
-                    console.log(`✅ AI confirmed ${festival.name} is actually today!`);
-                    todaysFestivals.push(festival);
-                    
-                    // Update the stored date
-                    await updateFestivalDate(festival.name, verification.correctDate);
-                } else if (verification.correctDate && verification.correctDate !== festival.date) {
-                    // Update stored date for future reference
-                    console.log(`📅 Updating ${festival.name} date from ${festival.date} to ${verification.correctDate}`);
-                    await updateFestivalDate(festival.name, verification.correctDate);
+                // Validate AI returned a real date format
+                if (verification.correctDate && /^\d{2}\/\d{2}$/.test(verification.correctDate)) {
+                    // Only add if AI confirms the correct date IS today
+                    if (verification.correctDate === today) {
+                        console.log(`✅ AI confirmed ${festival.name} is actually today!`);
+                        todaysFestivals.push(festival);
+                        await updateFestivalDate(festival.name, verification.correctDate);
+                    } else if (verification.correctDate !== festival.date) {
+                        // Update stored date for future reference
+                        console.log(`📅 Updating ${festival.name} date from ${festival.date} to ${verification.correctDate}`);
+                        await updateFestivalDate(festival.name, verification.correctDate);
+                    }
+                } else {
+                    console.log(`⚠️ AI returned invalid date for ${festival.name}: ${verification.correctDate}`);
                 }
             }
         }
@@ -1450,13 +1459,16 @@ client.once(Events.ClientReady, async (c) => {
         const now = getISTTime();
         const day = now.getDate().toString().padStart(2, '0');
         const month = (now.getMonth() + 1).toString().padStart(2, '0');
+        const year = now.getFullYear();
         const today = `${day}/${month}`; // DD/MM format
+        
+        console.log(`📅 Startup check - Today's date (IST): ${today}/${year}`);
         
         // Fetch festivals from Supabase
         const allFestivals = await getFestivals();
         let todaysFestivals = allFestivals.filter(f => f.date === today);
         
-        // Verify lunar calendar festivals with AI on startup too
+        // Identify lunar calendar festivals that need verification
         const lunarFestivals = allFestivals.filter(f => 
             f.type === 'muslim' || 
             ['Diwali', 'Dussehra', 'Ganesh', 'Navaratri', 'Shivaratri', 'Eid', 'Ramadan', 'Muharram', 'Milad', 'Onam', 'Thaipusam', 'Janmashtami', 'Krishna'].some(
@@ -1464,22 +1476,28 @@ client.once(Events.ClientReady, async (c) => {
             )
         );
         
-        for (const festival of lunarFestivals) {
-            if (!todaysFestivals.find(f => f.name === festival.name)) {
-                const verification = await verifyFestivalDate(festival, today);
-                
-                // Only add to today's festivals if AI confirms it's today AND the date matches
-                // If AI returns a different correctDate, it means the festival is NOT today
-                if (verification.isToday && (!verification.correctDate || verification.correctDate === today)) {
-                    todaysFestivals.push(festival);
-                }
-                
-                // Update the stored date if AI provides a correction (regardless of whether it's today)
-                if (verification.correctDate && verification.correctDate !== festival.date) {
+        // Verify lunar festivals that are supposedly today - remove if AI says otherwise
+        for (const festival of todaysFestivals.filter(f => lunarFestivals.some(lf => lf.name === f.name))) {
+            console.log(`🔍 Startup: Verifying ${festival.name} (stored: ${festival.date})...`);
+            const verification = await verifyFestivalDate(festival, today, year);
+            
+            // Validate that AI returned a real date, not literal "DD/MM"
+            if (verification.correctDate && /^\d{2}\/\d{2}$/.test(verification.correctDate)) {
+                if (verification.correctDate !== today) {
+                    console.log(`❌ ${festival.name} is NOT today. AI says correct date is ${verification.correctDate}`);
+                    todaysFestivals = todaysFestivals.filter(f => f.name !== festival.name);
                     await updateFestivalDate(festival.name, verification.correctDate);
+                } else {
+                    console.log(`✅ Confirmed: ${festival.name} is today!`);
                 }
+            } else {
+                console.log(`⚠️ AI returned invalid date for ${festival.name}: ${verification.correctDate}`);
+                // Don't post if we can't verify - remove from today's list to be safe
+                todaysFestivals = todaysFestivals.filter(f => f.name !== festival.name);
             }
         }
+        
+        // Don't check for festivals NOT in today's list on startup - that's the job of the 8 AM cron
         
         if (todaysFestivals.length > 0) {
             const channel = await client.channels.fetch(CHANNEL_ID);
