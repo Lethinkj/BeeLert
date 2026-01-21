@@ -35,6 +35,7 @@ const LOUNGE_VOICE_CHANNEL_ID = process.env.LOUNGE_VOICE_CHANNEL_ID || '13503243
 const AURA_VOICE_CHANNEL_ID = process.env.AURA_VOICE_CHANNEL_ID || '1350324320672546827';
 const MEETING_ROOM1_CHANNEL_ID = process.env.MEETING_ROOM1_CHANNEL_ID || '1350324320672546828';
 const MEETING_ROOM2_CHANNEL_ID = process.env.MEETING_ROOM2_CHANNEL_ID || '1367146219633119354';
+const GUEST_VOICE_CHANNEL_ID = process.env.GUEST_VOICE_CHANNEL_ID || '1459945478488854641';
 const MEETING_SUMMARY_CHANNEL_ID = process.env.MEETING_SUMMARY_CHANNEL_ID || '1442861248285773924';
 const SCHEDULE_MEET_CHANNEL_ID = process.env.SCHEDULE_MEET_CHANNEL_ID || '1443135153185493033';
 const ROLE_NAME = process.env.ROLE_NAME || 'Basher';
@@ -48,7 +49,8 @@ const VOICE_CHANNELS = [
     { id: LOUNGE_VOICE_CHANNEL_ID, name: 'Lounge' },
     { id: AURA_VOICE_CHANNEL_ID, name: 'Aura-7f Space' },
     { id: MEETING_ROOM1_CHANNEL_ID, name: 'Meeting Room 1' },
-    { id: MEETING_ROOM2_CHANNEL_ID, name: 'Meeting Room 2' }
+    { id: MEETING_ROOM2_CHANNEL_ID, name: 'Meeting Room 2' },
+    { id: GUEST_VOICE_CHANNEL_ID, name: 'Guest' }
 ];
 
 // ============================================
@@ -199,11 +201,10 @@ Use: 🪔Diwali 🐘Ganesh 🏹Dussehra 🔥Karthigai 🌙Muslim 🌼Onam 🎄Ch
  * Verify festival date with AI before posting (for lunar calendar festivals that may shift)
  * @param {Object} festival - Festival object with name and date
  * @param {string} today - Today's date in DD/MM format
+ * @param {number} year - Current year
  * @returns {Promise<{isToday: boolean, correctDate: string|null}>}
  */
-async function verifyFestivalDate(festival, today) {
-    const year = new Date().getFullYear();
-    
+async function verifyFestivalDate(festival, today, year) {
     // Skip verification for fixed-date festivals
     const fixedDateFestivals = ['New Year', 'Republic Day', 'Independence Day', 'Christmas', 'Tamil New Year', 'Puthandu', 'Pongal'];
     if (fixedDateFestivals.some(f => festival.name.toLowerCase().includes(f.toLowerCase()))) {
@@ -211,14 +212,18 @@ async function verifyFestivalDate(festival, today) {
     }
     
     try {
-        const prompt = `What is the exact date of ${festival.name} in ${year}? 
-This is important for sending festival greetings.
-Today's date is ${today}/${year} (DD/MM/YYYY format).
+        const prompt = `What is the EXACT date of ${festival.name} in the year ${year}?
 
-Return ONLY a JSON object like this, nothing else:
-{"festivalName":"${festival.name}","correctDate":"DD/MM","isToday":true/false}
+IMPORTANT: I need the accurate date for this specific year (${year}).
+- For Islamic festivals like Eid ul-Fitr, Eid ul-Adha, Muharram, Milad-un-Nabi: These follow the Islamic lunar calendar and shift each year.
+- For Hindu lunar festivals like Diwali, Dussehra, Navaratri: These follow the Hindu lunar calendar.
 
-If the festival is today, set isToday to true. Use DD/MM format for correctDate.`;
+Return ONLY a JSON object with the correct date in DD/MM format:
+{"festivalName":"${festival.name}","correctDate":"DD/MM"}
+
+Example: {"festivalName":"Eid ul-Fitr","correctDate":"30/03"}
+
+Do NOT include any other text, explanation, or markdown. Just the JSON object.`;
 
         const response = await aiService.askQuestion(prompt);
         
@@ -226,16 +231,24 @@ If the festival is today, set isToday to true. Use DD/MM format for correctDate.
         const jsonMatch = response.match(/\{[\s\S]*\}/);
         if (jsonMatch) {
             const result = JSON.parse(jsonMatch[0]);
+            const correctDate = result.correctDate || null;
+            
+            // Only return isToday: true if the AI's correctDate matches today exactly
+            // Don't trust AI's isToday field - calculate it ourselves
+            const isToday = correctDate === today;
+            
+            console.log(`   📅 AI says ${festival.name} is on ${correctDate}, today is ${today}, match: ${isToday}`);
+            
             return {
-                isToday: result.isToday === true,
-                correctDate: result.correctDate || null
+                isToday: isToday,
+                correctDate: correctDate
             };
         }
     } catch (error) {
         console.error(`❌ Error verifying ${festival.name} date:`, error.message);
     }
     
-    // Fallback to stored date
+    // Fallback to stored date comparison only (don't assume it's today)
     return { isToday: festival.date === today, correctDate: null };
 }
 
@@ -1214,14 +1227,17 @@ client.once(Events.ClientReady, async (c) => {
         const now = getISTTime();
         const day = now.getDate().toString().padStart(2, '0');
         const month = (now.getMonth() + 1).toString().padStart(2, '0');
+        const year = now.getFullYear();
         const today = `${day}/${month}`; // DD/MM format
         
-        // Find today's festivals from Supabase
+        console.log(`📅 Today's date (IST): ${today}/${year}`);
+        
+        // Find today's festivals from Supabase (only those that match today's date exactly)
         const allFestivals = await getFestivals();
         let todaysFestivals = allFestivals.filter(f => f.date === today);
         
-        // Also check if any lunar calendar festivals (Muslim/Hindu) should be today
-        // by verifying with AI for festivals that might have shifted
+        // For lunar calendar festivals, verify with AI if the stored date matches today
+        // This is to double-check that stored dates are correct for the current year
         const lunarFestivals = allFestivals.filter(f => 
             f.type === 'muslim' || 
             ['Diwali', 'Dussehra', 'Ganesh', 'Navaratri', 'Shivaratri', 'Eid', 'Ramadan', 'Muharram', 'Milad', 'Onam', 'Thaipusam', 'Janmashtami', 'Krishna'].some(
@@ -1229,21 +1245,40 @@ client.once(Events.ClientReady, async (c) => {
             )
         );
         
-        // Verify lunar calendar festivals
+        // Verify lunar calendar festivals that are supposedly today
+        // Remove any that AI says are NOT actually today
+        for (const festival of todaysFestivals.filter(f => lunarFestivals.some(lf => lf.name === f.name))) {
+            console.log(`🔍 Verifying stored date for ${festival.name} (stored: ${festival.date})...`);
+            const verification = await verifyFestivalDate(festival, today, year);
+            
+            // If AI says the correct date is different from today, remove this festival
+            if (verification.correctDate && verification.correctDate !== today) {
+                console.log(`❌ ${festival.name} is NOT today. AI says correct date is ${verification.correctDate}`);
+                todaysFestivals = todaysFestivals.filter(f => f.name !== festival.name);
+                
+                // Update the stored date for future reference
+                await updateFestivalDate(festival.name, verification.correctDate);
+            } else if (verification.isToday) {
+                console.log(`✅ Confirmed: ${festival.name} is today!`);
+            }
+        }
+        
+        // Also check if any lunar festivals NOT in today's list might actually be today
+        // (in case the stored date was wrong)
         for (const festival of lunarFestivals) {
-            if (!todaysFestivals.find(f => f.name === festival.name)) {
-                console.log(`🔍 Verifying date for ${festival.name}...`);
-                const verification = await verifyFestivalDate(festival, today);
+            if (!todaysFestivals.find(f => f.name === festival.name) && festival.date !== today) {
+                console.log(`🔍 Checking if ${festival.name} (stored: ${festival.date}) might be today...`);
+                const verification = await verifyFestivalDate(festival, today, year);
                 
-                // Only add to today's festivals if AI confirms AND date matches today
-                // If AI returns a different correctDate, the festival is NOT today
-                if (verification.isToday && (!verification.correctDate || verification.correctDate === today)) {
-                    console.log(`✅ AI confirmed ${festival.name} is today!`);
+                // Only add if AI confirms the correct date IS today
+                if (verification.isToday && verification.correctDate === today) {
+                    console.log(`✅ AI confirmed ${festival.name} is actually today!`);
                     todaysFestivals.push(festival);
-                }
-                
-                // Update the stored date if AI provides a correction (for future reference)
-                if (verification.correctDate && verification.correctDate !== festival.date) {
+                    
+                    // Update the stored date
+                    await updateFestivalDate(festival.name, verification.correctDate);
+                } else if (verification.correctDate && verification.correctDate !== festival.date) {
+                    // Update stored date for future reference
                     console.log(`📅 Updating ${festival.name} date from ${festival.date} to ${verification.correctDate}`);
                     await updateFestivalDate(festival.name, verification.correctDate);
                 }
@@ -2839,7 +2874,8 @@ client.on(Events.MessageCreate, async (message) => {
                         `• \`1\` - 🌴 Lounge\n` +
                         `• \`2\` - 💬 Aura 7F\n` +
                         `• \`3\` - 📹 Meeting Room 1\n` +
-                        `• \`4\` - 📹 Meeting Room 2\n\n` +
+                        `• \`4\` - 📹 Meeting Room 2\n` +
+                        `• \`5\` - 👋 Guest\n\n` +
                         `_Type \`cancel\` to exit_`
                     );
                     session.messages.push(promptMsg);
@@ -2852,13 +2888,14 @@ client.on(Events.MessageCreate, async (message) => {
                     else if (channelInput === '2' || channelInput.includes('aura')) channelNum = 2;
                     else if (channelInput === '3' || channelInput.includes('room 1')) channelNum = 3;
                     else if (channelInput === '4' || channelInput.includes('room 2')) channelNum = 4;
+                    else if (channelInput === '5' || channelInput.includes('guest')) channelNum = 5;
                     else {
-                        const numMatch = channelInput.match(/[1-4]/);
+                        const numMatch = channelInput.match(/[1-5]/);
                         if (numMatch) channelNum = parseInt(numMatch[0]);
                     }
                     
                     if (!channelNum) {
-                        const errorMsg = await message.channel.send(`❌ Invalid channel. Enter a number from 1 to 4.`);
+                        const errorMsg = await message.channel.send(`❌ Invalid channel. Enter a number from 1 to 5.`);
                         session.messages.push(errorMsg);
                         return;
                     }
