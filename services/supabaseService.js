@@ -1005,5 +1005,162 @@ module.exports = {
     getMonthlyLeaderboard,
     getAllTimeLeaderboard,
     logVoiceSession,
-    getUserVoiceSessions
+    getUserVoiceSessions,
+    // Progress Tracking
+    recordProgressUpdate,
+    getUserProgressStats,
+    getProgressLeaderboard,
+    hasPostedToday
 };
+
+// ==================== PROGRESS TRACKING OPERATIONS ====================
+
+/**
+ * Record a progress update with points and streak
+ */
+async function recordProgressUpdate(discordUserId, username, content, wordCount, hasImage, aiFeedback) {
+    if (!isConfigured) return null;
+    
+    try {
+        const today = new Date().toISOString().split('T')[0];
+        
+        let { data: userStats } = await supabase
+            .from('user_progress_stats')
+            .select('*')
+            .eq('discord_user_id', discordUserId)
+            .single();
+        
+        let currentStreak = 1;
+        let longestStreak = 1;
+        let totalPoints = 5;
+        let totalUpdates = 1;
+        
+        if (userStats) {
+            const lastUpdate = new Date(userStats.last_update_date);
+            const todayDate = new Date(today);
+            const diffDays = Math.floor((todayDate - lastUpdate) / (1000 * 60 * 60 * 24));
+            
+            if (diffDays === 1) {
+                currentStreak = userStats.current_streak + 1;
+            } else if (diffDays === 0) {
+                currentStreak = userStats.current_streak;
+            } else {
+                currentStreak = 1;
+            }
+            
+            longestStreak = Math.max(currentStreak, userStats.longest_streak);
+            totalPoints = userStats.total_points + 5;
+            totalUpdates = userStats.total_updates + 1;
+            
+            await supabase
+                .from('user_progress_stats')
+                .update({
+                    username: username,
+                    total_points: totalPoints,
+                    current_streak: currentStreak,
+                    longest_streak: longestStreak,
+                    last_update_date: today,
+                    total_updates: totalUpdates,
+                    updated_at: new Date().toISOString()
+                })
+                .eq('discord_user_id', discordUserId);
+        } else {
+            await supabase
+                .from('user_progress_stats')
+                .insert({
+                    discord_user_id: discordUserId,
+                    username: username,
+                    total_points: 5,
+                    current_streak: 1,
+                    longest_streak: 1,
+                    last_update_date: today,
+                    total_updates: 1
+                });
+        }
+        
+        const { data: progressUpdate, error: updateError } = await supabase
+            .from('progress_updates')
+            .insert({
+                discord_user_id: discordUserId,
+                username: username,
+                content: content,
+                word_count: wordCount,
+                has_image: hasImage,
+                points_awarded: 5,
+                current_streak: currentStreak,
+                ai_feedback: aiFeedback,
+                update_date: today
+            })
+            .select()
+            .single();
+        
+        if (updateError) {
+            console.error('❌ Error recording progress update:', updateError.message);
+            return null;
+        }
+        
+        return {
+            ...progressUpdate,
+            total_points: totalPoints,
+            current_streak: currentStreak
+        };
+    } catch (error) {
+        console.error('❌ Error in recordProgressUpdate:', error.message);
+        return null;
+    }
+}
+
+/**
+ * Get user progress stats
+ */
+async function getUserProgressStats(discordUserId) {
+    if (!isConfigured) return null;
+    
+    const { data, error } = await supabase
+        .from('user_progress_stats')
+        .select('*')
+        .eq('discord_user_id', discordUserId)
+        .single();
+    
+    if (error && error.code !== 'PGRST116') {
+        console.error('❌ Error fetching user progress stats:', error.message);
+    }
+    return data;
+}
+
+/**
+ * Get progress leaderboard
+ */
+async function getProgressLeaderboard(limit = 10) {
+    if (!isConfigured) return [];
+    
+    const { data, error } = await supabase
+        .from('user_progress_stats')
+        .select('*')
+        .order('total_points', { ascending: false })
+        .limit(limit);
+    
+    if (error) {
+        console.error('❌ Error fetching progress leaderboard:', error.message);
+        return [];
+    }
+    return data || [];
+}
+
+/**
+ * Check if user already posted today
+ */
+async function hasPostedToday(discordUserId) {
+    if (!isConfigured) return false;
+    
+    const today = new Date().toISOString().split('T')[0];
+    
+    const { data } = await supabase
+        .from('progress_updates')
+        .select('id')
+        .eq('discord_user_id', discordUserId)
+        .eq('update_date', today)
+        .single();
+    
+    return data !== null;
+}

@@ -187,10 +187,81 @@ function isAIAvailable() {
     return isConfigured;
 }
 
+/**
+ * Verify progress update and provide coaching feedback
+ * @param {string} content - Progress update text
+ * @returns {Promise<Object>} - { isValid, clarityTip, nextStep, topicFact }
+ */
+async function verifyProgressUpdate(content) {
+    if (!isConfigured) {
+        return {
+            isValid: true,
+            clarityTip: "Keep up the great work!",
+            nextStep: "Continue making progress and sharing your updates.",
+            topicFact: "Consistency is key to success."
+        };
+    }
+    
+    try {
+        const prompt = `You are an AI progress coach. Analyze this daily progress update for spam/validity and provide constructive feedback.
+
+Progress Update: "${content}"
+
+Respond in JSON format ONLY (no markdown):
+{
+    "isValid": true/false,
+    "clarityTip": "One sentence about writing clarity or structure",
+    "nextStep": "One actionable suggestion for their next update (2-3 sentences)",
+    "topicFact": "One interesting fact related to their work topic"
+}
+
+Rules:
+- isValid: false only if it's spam, gibberish, or completely irrelevant
+- Be encouraging and constructive
+- Keep tips concise and actionable
+- Make feedback specific to their content`;
+
+        const response = await makeOpenRouterRequest([
+            { role: 'system', content: 'You are a helpful AI progress coach. Always respond with valid JSON.' },
+            { role: 'user', content: prompt }
+        ], 300);
+        
+        // Parse JSON response
+        let feedback;
+        try {
+            const jsonMatch = response.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+                feedback = JSON.parse(jsonMatch[0]);
+            } else {
+                feedback = JSON.parse(response);
+            }
+        } catch (parseError) {
+            console.error('❌ Error parsing AI feedback:', parseError.message);
+            feedback = {
+                isValid: true,
+                clarityTip: "Your update is clear and well-written.",
+                nextStep: "Keep maintaining this level of detail in your updates. Consider adding specific metrics or challenges faced.",
+                topicFact: "Regular progress tracking improves productivity by 25% on average."
+            };
+        }
+        
+        return feedback;
+    } catch (error) {
+        console.error('❌ Error verifying progress update:', error.message);
+        return {
+            isValid: true,
+            clarityTip: "Keep up the great work!",
+            nextStep: "Continue making progress and sharing your updates.",
+            topicFact: "Consistency is key to long-term success."
+        };
+    }
+}
+
 module.exports = {
     askQuestion,
     generateMotivation,
     askWithContext,
     askWithHistory,
-    isAIAvailable
+    isAIAvailable,
+    verifyProgressUpdate
 };

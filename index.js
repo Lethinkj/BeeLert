@@ -31,6 +31,8 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const CHANNEL_ID = process.env.CHANNEL_ID;
 const GEMINI_CHANNEL_ID = process.env.GEMINI_CHANNEL_ID;
 const STUDY_CHANNEL_ID = process.env.STUDY_CHANNEL_ID;
+const PROGRESS_CHANNEL_ID = process.env.PROGRESS_CHANNEL_ID || '1467890154164191343';
+const ROOKIE_ROLE_ID = process.env.ROOKIE_ROLE_ID || '1358772531745521684';
 const LOUNGE_VOICE_CHANNEL_ID = process.env.LOUNGE_VOICE_CHANNEL_ID || '1350324320672546826';
 const AURA_VOICE_CHANNEL_ID = process.env.AURA_VOICE_CHANNEL_ID || '1350324320672546827';
 const MEETING_ROOM1_CHANNEL_ID = process.env.MEETING_ROOM1_CHANNEL_ID || '1350324320672546828';
@@ -2335,6 +2337,80 @@ client.on(Events.MessageCreate, async (message) => {
     // Ignore bot messages
     if (message.author.bot) return;
     
+    // Debug: Log all messages in guilds
+    if (message.guild) {
+        const parentId = message.channel.parentId || message.channel.id;
+        const isThread = message.channel.isThread();
+        console.log(`💬 Message from ${message.author.username} in ${isThread ? 'thread' : 'channel'} ${message.channel.id} (Parent: ${parentId}, Progress: ${PROGRESS_CHANNEL_ID})`);
+    }
+    
+    // Handle progress updates in the PROGRESS_CHANNEL_ID (including threads)
+    const channelId = message.channel.parentId || message.channel.id; // Get parent channel if in thread
+    if (channelId === PROGRESS_CHANNEL_ID && !message.content.startsWith('!')) {
+        console.log(`📝 Message in progress channel from ${message.author.username}`);
+        // Check if user has the ROOKIE_ROLE_ID
+        const member = message.member;
+        console.log(`👤 Member roles:`, member ? Array.from(member.roles.cache.keys()) : 'No member');
+        console.log(`🔍 Looking for rookie role: ${ROOKIE_ROLE_ID}`);
+        if (!member || !member.roles.cache.has(ROOKIE_ROLE_ID)) {
+            console.log(`⚠️ User ${message.author.username} doesn't have rookie role (ID: ${ROOKIE_ROLE_ID})`);
+            return; // Ignore messages from users without the rookie role
+        }
+        console.log(`✅ User ${message.author.username} has rookie role, processing progress update...`);
+        
+        try {
+            // Check if already posted today
+            const alreadyPosted = await supabaseService.hasPostedToday(message.author.id);
+            if (alreadyPosted) {
+                return; // Silently ignore if already posted today
+            }
+            
+            // Check for image attachment
+            const hasImage = message.attachments.size > 0 && 
+                            message.attachments.some(att => att.contentType?.startsWith('image/'));
+            
+            if (!hasImage) {
+                return; // Silently ignore if no image
+            }
+            
+            // Record progress update (no AI verification, no word count)
+            const result = await supabaseService.recordProgressUpdate(
+                message.author.id,
+                message.author.username,
+                message.content,
+                0, // word count not needed
+                hasImage,
+                null // no AI feedback
+            );
+            
+            if (!result) {
+                console.error('Failed to record progress update');
+                return;
+            }
+            
+            // Format date
+            const today = new Date();
+            const formattedDate = `${today.getMonth() + 1}/${today.getDate()}/${today.getFullYear()}`;
+            
+            // Send simple success message
+            const responseMessage = 
+                `Appreciation for updating your daily progress, ${ROLE_NAME} ${message.author.username}. You've been awarded **5 points** for your update ${formattedDate}\n` +
+                `Current streak: **${result.current_streak} day${result.current_streak > 1 ? 's' : ''}**! ${result.current_streak >= 7 ? 'Amazing consistency!' : 'Keep it up!'}`;
+            
+            await message.reply(responseMessage);
+            
+            console.log(`✅ Progress update recorded for ${message.author.username}, Streak: ${result.current_streak}`);
+            
+        } catch (error) {
+            console.error('❌ Error handling progress update:', error);
+        }
+        
+        return; // Stop here for progress channel messages
+    }
+    
+    // Handle bot messages
+    if (message.author.bot) return;
+    
     // Handle DMs (personal reminders)
     if (!message.guild) {
         const userId = message.author.id;
@@ -2685,6 +2761,36 @@ client.on(Events.MessageCreate, async (message) => {
     }
 
     // Server message handler starts here
+    
+    // Handle !rookie command
+    if (message.content.toLowerCase() === '!rookie') {
+        try {
+            const leaderboard = await supabaseService.getProgressLeaderboard(10);
+            
+            if (leaderboard.length === 0) {
+                await message.reply("📊 No progress updates yet! Be the first to post in the progress channel.");
+                return;
+            }
+            
+            let leaderboardText = "🏆 **Rookie Progress Leaderboard** 🏆\n\n";
+            
+            leaderboard.forEach((user, index) => {
+                const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `${index + 1}.`;
+                const streak = user.current_streak > 0 ? `🔥 ${user.current_streak}` : '';
+                leaderboardText += `${medal} **${user.username}** - ${user.total_points} pts ${streak}\n`;
+                leaderboardText += `   └ ${user.total_updates} updates | Longest: ${user.longest_streak} days\n\n`;
+            });
+            
+            leaderboardText += `\n💡 Post daily progress updates in <#${PROGRESS_CHANNEL_ID}> to earn points and maintain your streak!`;
+            
+            await message.reply(leaderboardText);
+        } catch (error) {
+            console.error('Error fetching rookie leaderboard:', error);
+            await message.reply("❌ Failed to fetch leaderboard. Please try again later.");
+        }
+        return;
+    }
+    
     // Interactive meeting scheduling wizard in schedule-meet channel
     if (message.channel.id === SCHEDULE_MEET_CHANNEL_ID && !message.content.startsWith('!')) {
         const userId = message.author.id;
