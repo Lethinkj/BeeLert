@@ -2348,6 +2348,24 @@ client.on(Events.MessageCreate, async (message) => {
     const channelId = message.channel.parentId || message.channel.id; // Get parent channel if in thread
     if (channelId === PROGRESS_CHANNEL_ID && !message.content.startsWith('!')) {
         console.log(`📝 Message in progress channel from ${message.author.username}`);
+        
+        // Check if message is in a thread
+        if (message.channel.isThread()) {
+            // Verify user is posting in their own thread
+            const threadOwnerId = message.channel.ownerId;
+            if (threadOwnerId !== message.author.id) {
+                console.log(`⚠️ User ${message.author.username} posting in someone else's thread`);
+                const reply = await message.reply("⚠️ Please post your progress update in your own thread to earn points!");
+                setTimeout(() => reply.delete().catch(() => {}), 10000);
+                return;
+            }
+        } else {
+            // Not in a thread - tell them to create their own thread
+            const reply = await message.reply("⚠️ Please create your own thread and post your progress there to earn points!");
+            setTimeout(() => reply.delete().catch(() => {}), 10000);
+            return;
+        }
+        
         // Check if user has the ROOKIE_ROLE_ID
         const member = message.member;
         console.log(`👤 Member roles:`, member ? Array.from(member.roles.cache.keys()) : 'No member');
@@ -2359,10 +2377,16 @@ client.on(Events.MessageCreate, async (message) => {
         console.log(`✅ User ${message.author.username} has rookie role, processing progress update...`);
         
         try {
-            // Check if already posted today
+            // Get IST date for today
+            const nowIST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+            const todayIST = nowIST.toISOString().split('T')[0]; // YYYY-MM-DD in IST
+            
+            // Check if already posted today (based on IST timezone)
             const alreadyPosted = await supabaseService.hasPostedToday(message.author.id);
             if (alreadyPosted) {
-                return; // Silently ignore if already posted today
+                const reply = await message.reply("⚠️ You've already posted your progress update today! Come back after 12:00 AM IST tomorrow.");
+                setTimeout(() => reply.delete().catch(() => {}), 10000);
+                return;
             }
             
             // Check for image attachment
@@ -2388,9 +2412,8 @@ client.on(Events.MessageCreate, async (message) => {
                 return;
             }
             
-            // Format date
-            const today = new Date();
-            const formattedDate = `${today.getMonth() + 1}/${today.getDate()}/${today.getFullYear()}`;
+            // Format date in IST
+            const formattedDate = `${nowIST.getMonth() + 1}/${nowIST.getDate()}/${nowIST.getFullYear()}`;
             
             // Send simple success message
             const responseMessage = 
