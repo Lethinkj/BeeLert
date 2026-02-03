@@ -1022,7 +1022,9 @@ async function recordProgressUpdate(discordUserId, username, content, wordCount,
     if (!isConfigured) return null;
     
     try {
-        const today = new Date().toISOString().split('T')[0];
+        // Use IST timezone for consistent date tracking
+        const nowIST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+        const today = nowIST.toISOString().split('T')[0];
         
         let { data: userStats } = await supabase
             .from('user_progress_stats')
@@ -1153,7 +1155,9 @@ async function getProgressLeaderboard(limit = 10) {
 async function hasPostedToday(discordUserId) {
     if (!isConfigured) return false;
     
-    const today = new Date().toISOString().split('T')[0];
+    // Use IST timezone for consistent date tracking
+    const nowIST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+    const today = nowIST.toISOString().split('T')[0];
     
     const { data } = await supabase
         .from('progress_updates')

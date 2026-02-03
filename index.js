@@ -2422,6 +2422,9 @@ client.on(Events.MessageCreate, async (message) => {
             
             await message.reply(responseMessage);
             
+            // React with green tick to verified progress post
+            await message.react('✅').catch(() => {});
+            
             console.log(`✅ Progress update recorded for ${message.author.username}, Streak: ${result.current_streak}`);
             
         } catch (error) {
