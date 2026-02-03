@@ -1165,16 +1165,25 @@ async function getProgressLeaderboard(limit = 10) {
 async function hasPostedToday(discordUserId) {
     if (!isConfigured) return false;
     
-    // Use IST timezone for consistent date tracking
-    const nowIST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
-    const today = nowIST.toISOString().split('T')[0];
-    
-    const { data } = await supabase
-        .from('progress_updates')
-        .select('id')
-        .eq('discord_user_id', discordUserId)
-        .eq('update_date', today)
-        .single();
-    
-    return data !== null;
-}
+    try {
+        // Use IST timezone for consistent date tracking
+        const nowIST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+        const today = nowIST.toISOString().split('T')[0];
+        
+        const { data, error } = await supabase
+            .from('progress_updates')
+            .select('id')
+            .eq('discord_user_id', discordUserId)
+            .eq('update_date', today)
+            .limit(1);
+        
+        if (error) {
+            console.error('❌ Error checking if posted today:', error.message);
+            return false; // Fail safe - allow post if check fails
+        }
+        
+        return data && data.length > 0;
+    } catch (error) {
+        console.error('❌ Error in hasPostedToday:', error.message);
+        return false; // Fail safe
+    }
