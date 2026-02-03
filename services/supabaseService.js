@@ -1187,3 +1187,4 @@ async function hasPostedToday(discordUserId) {
         console.error('❌ Error in hasPostedToday:', error.message);
         return false; // Fail safe
     }
+}
