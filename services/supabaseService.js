@@ -1054,7 +1054,7 @@ async function recordProgressUpdate(discordUserId, username, content, wordCount,
             totalPoints = userStats.total_points + 5;
             totalUpdates = userStats.total_updates + 1;
             
-            await supabase
+            const { error: statsError } = await supabase
                 .from('user_progress_stats')
                 .update({
                     username: username,
@@ -1066,8 +1066,13 @@ async function recordProgressUpdate(discordUserId, username, content, wordCount,
                     updated_at: new Date().toISOString()
                 })
                 .eq('discord_user_id', discordUserId);
+            
+            if (statsError) {
+                console.error('❌ Error updating progress stats:', statsError.message);
+                return null;
+            }
         } else {
-            await supabase
+            const { error: insertError } = await supabase
                 .from('user_progress_stats')
                 .insert({
                     discord_user_id: discordUserId,
@@ -1078,6 +1083,11 @@ async function recordProgressUpdate(discordUserId, username, content, wordCount,
                     last_update_date: today,
                     total_updates: 1
                 });
+            
+            if (insertError) {
+                console.error('❌ Error creating progress stats:', insertError.message);
+                return null;
+            }
         }
         
         const { data: progressUpdate, error: updateError } = await supabase
