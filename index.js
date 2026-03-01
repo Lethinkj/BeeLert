@@ -1137,16 +1137,17 @@ async function sendDailyUpdate() {
 
 // Bot ready event
 client.once(Events.ClientReady, async (c) => {
-    console.log(`${c.user.tag} has connected to Discord!`);
-    console.log(`Bot is ready at ${formatISTTime(getISTTime())}`);
-    // Removed: setTimeout(() => sendWelcomeMessages(), 3000);
+    try {
+        console.log(`${c.user.tag} has connected to Discord!`);
+        console.log(`Bot is ready at ${formatISTTime(getISTTime())}`);
+        // Removed: setTimeout(() => sendWelcomeMessages(), 3000);
 
-    // Update bot status
-    botStatus.isOnline = true;
-    botStatus.connectedAt = new Date().toISOString();
-    
-    // Load daily reminders from database
-    await loadRemindersFromDatabase();
+        // Update bot status
+        botStatus.isOnline = true;
+        botStatus.connectedAt = new Date().toISOString();
+        
+        // Load daily reminders from database
+        await loadRemindersFromDatabase();
 
     // Register slash commands
     try {
@@ -1648,6 +1649,10 @@ client.once(Events.ClientReady, async (c) => {
         console.log('📅 Meeting Manager interface posted in schedule channel');
     } catch (error) {
         console.error('Error posting meeting manager:', error);
+    }
+    } catch (readyHandlerError) {
+        console.error('❌ Error in Discord ready event handler:', readyHandlerError);
+        console.error('Stack:', readyHandlerError.stack);
     }
 });
 
@@ -3862,12 +3867,16 @@ client.once(Events.ClientReady, async () => {
 
 // Error Handling
 client.on(Events.Error, error => {
-    console.error('Discord client error:', error);
+    console.error('❌ Discord client error:', error);
     botStatus.isOnline = false;
 });
 
+client.on('warn', (warn) => {
+    console.warn('⚠️ Discord client warning:', warn);
+});
+
 process.on('unhandledRejection', error => {
-    console.error('Unhandled promise rejection:', error);
+    console.error('❌ Unhandled promise rejection:', error);
 });
 
 // Login to Discord
@@ -3877,12 +3886,22 @@ if (!BOT_TOKEN) {
     process.exit(1);
 }
 
+// Add timeout to detect if login hangs
+const loginTimeout = setTimeout(() => {
+    console.error('❌ Discord login timeout - bot did not connect within 30 seconds');
+    console.error('Token length:', BOT_TOKEN.length);
+    process.exit(1);
+}, 30000); // 30 second timeout
+
 client.login(BOT_TOKEN)
     .then(() => {
+        clearTimeout(loginTimeout);
         console.log('✅ Discord login successful');
     })
     .catch(error => {
-        console.error('❌ Failed to login to Discord:', error);
+        clearTimeout(loginTimeout);
+        console.error('❌ Failed to login to Discord:', error.message);
+        console.error('Error details:', error);
         console.error('Token present:', BOT_TOKEN ? 'Yes (length: ' + BOT_TOKEN.length + ')' : 'No');
         process.exit(1);
     });
