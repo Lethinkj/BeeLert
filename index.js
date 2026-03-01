@@ -8,10 +8,71 @@ const aiService = require('./services/aiService');
 // Import Supabase service
 const supabaseService = require('./services/supabaseService');
 
-// Deduplication: prevent processing same event twice (Replit multi-instance guard)
+// ==== INSTANCE LOCK: Prevent duplicate bot instances (Replit issue) ====
+const INSTANCE_ID = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+let isPrimaryInstance = true; // assume primary until proven otherwise
+
+async function claimInstanceLock() {
+    if (!supabaseService.isSupabaseConfigured()) return true;
+    try {
+        const { supabase } = supabaseService;
+        const now = new Date().toISOString();
+        const LOCK_KEY = 'bot_instance_lock';
+
+        // Try to read current lock
+        const { data: existing } = await supabase
+            .from('heartbeat_logs')
+            .select('*')
+            .eq('bot_status', LOCK_KEY)
+            .single();
+
+        if (existing) {
+            const lastPing = new Date(existing.last_ping);
+            const staleMs = Date.now() - lastPing.getTime();
+            // If lock is fresh (< 30s old) and held by another instance, we are secondary
+            if (staleMs < 30000 && existing.first_ping !== INSTANCE_ID) {
+                console.log(`⚠️ Another instance is primary (${existing.first_ping}). This instance (${INSTANCE_ID}) will stay IDLE.`);
+                return false;
+            }
+            // Lock is stale or ours — claim it
+            await supabase
+                .from('heartbeat_logs')
+                .update({ first_ping: INSTANCE_ID, last_ping: now })
+                .eq('id', existing.id);
+        } else {
+            // No lock exists, create one
+            await supabase
+                .from('heartbeat_logs')
+                .insert([{ log_date: 'LOCK', first_ping: INSTANCE_ID, last_ping: now, ping_count: 0, bot_status: LOCK_KEY }]);
+        }
+        console.log(`✅ This instance (${INSTANCE_ID}) claimed primary lock.`);
+        return true;
+    } catch (err) {
+        console.error('⚠️ Instance lock check failed, assuming primary:', err.message);
+        return true; // fail-open: if DB is down, allow processing
+    }
+}
+
+// Refresh lock every 15 seconds so other instances know we're alive
+setInterval(async () => {
+    if (!isPrimaryInstance || !supabaseService.isSupabaseConfigured()) return;
+    try {
+        const { supabase } = supabaseService;
+        await supabase
+            .from('heartbeat_logs')
+            .update({ last_ping: new Date().toISOString() })
+            .eq('bot_status', 'bot_instance_lock')
+            .eq('first_ping', INSTANCE_ID);
+    } catch (e) { /* ignore refresh errors */ }
+}, 15000);
+
+console.log(`🆔 Instance ID: ${INSTANCE_ID} — if you see this twice, two instances are running!`);
+
+// Deduplication: extra guard for same-process duplicate events
 const processedMessages = new Set();
 const DEDUP_CACHE_MAX = 500;
 function isDuplicate(id) {
+    if (!isPrimaryInstance) return true; // secondary instance skips everything
     if (processedMessages.has(id)) return true;
     processedMessages.add(id);
     if (processedMessages.size > DEDUP_CACHE_MAX) {
@@ -20,7 +81,6 @@ function isDuplicate(id) {
     }
     return false;
 }
-console.log(`🆔 Process ID: ${process.pid} — if you see this twice, two instances are running!`);
 
 // Create Express app for health check
 const app = express();
@@ -1158,7 +1218,15 @@ client.once(Events.ClientReady, async (c) => {
     try {
         console.log(`${c.user.tag} has connected to Discord!`);
         console.log(`Bot is ready at ${formatISTTime(getISTTime())}`);
-        // Removed: setTimeout(() => sendWelcomeMessages(), 3000);
+
+        // === INSTANCE LOCK: Only one instance should be active ===
+        isPrimaryInstance = await claimInstanceLock();
+        if (!isPrimaryInstance) {
+            console.log('🛑 This instance is SECONDARY — it will NOT process events or run cron jobs.');
+            console.log('   To fix: stop the duplicate process on Replit (check Run vs Deploy).');
+            botStatus.isOnline = false;
+            return; // Skip all setup — let the primary instance handle everything
+        }
 
         // Update bot status
         botStatus.isOnline = true;
@@ -1676,6 +1744,7 @@ client.once(Events.ClientReady, async (c) => {
 
 // Handle new member joins - assign guest role automatically
 client.on(Events.GuildMemberAdd, async (member) => {
+    if (!isPrimaryInstance) return;
     console.log(`👋 New member joined: ${member.user.tag}`);
     
     try {
@@ -3757,6 +3826,9 @@ async function generateMeetingSummary(meeting, totalDuration, channel, participa
 
 // Bot ready event - recover scheduled meetings from Discord events
 client.once(Events.ClientReady, async () => {
+    // Skip if this is a secondary instance
+    if (!isPrimaryInstance) return;
+    
     console.log(`✅ Bot logged in as ${client.user.tag}`);
     
     try {
