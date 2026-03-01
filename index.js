@@ -8,6 +8,20 @@ const aiService = require('./services/aiService');
 // Import Supabase service
 const supabaseService = require('./services/supabaseService');
 
+// Deduplication: prevent processing same event twice (Replit multi-instance guard)
+const processedMessages = new Set();
+const DEDUP_CACHE_MAX = 500;
+function isDuplicate(id) {
+    if (processedMessages.has(id)) return true;
+    processedMessages.add(id);
+    if (processedMessages.size > DEDUP_CACHE_MAX) {
+        const first = processedMessages.values().next().value;
+        processedMessages.delete(first);
+    }
+    return false;
+}
+console.log(`🆔 Process ID: ${process.pid} — if you see this twice, two instances are running!`);
+
 // Create Express app for health check
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -720,12 +734,16 @@ app.get('/status', (req, res) => {
     });
 });
 
-// Start Express server
-app.listen(PORT, () => {
-    console.log(`Express server running on port ${PORT}`);
-    console.log(`Health check: http://localhost:${PORT}/health`);
-    console.log(`Status check: http://localhost:${PORT}/status`);
-});
+// Start Express server (can be disabled with NO_HTTP=true to avoid Replit dual-instance issues)
+if (process.env.NO_HTTP !== 'true') {
+    app.listen(PORT, () => {
+        console.log(`Express server running on port ${PORT}`);
+        console.log(`Health check: http://localhost:${PORT}/health`);
+        console.log(`Status check: http://localhost:${PORT}/status`);
+    });
+} else {
+    console.log('⚠️ HTTP server disabled (NO_HTTP=true) — bot-only mode');
+}
 
 // IST is UTC+5:30 (Render uses UTC/GMT)
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000; // 5 hours 30 minutes in milliseconds
@@ -1699,6 +1717,8 @@ client.on(Events.GuildMemberAdd, async (member) => {
 
 // Handle button and modal interactions
 client.on(Events.InteractionCreate, async (interaction) => {
+    // Dedup guard
+    if (isDuplicate(`interaction-${interaction.id}`)) return;
     try {
         // ===== SLASH COMMANDS HANDLER =====
         if (interaction.isChatInputCommand()) {
@@ -2341,6 +2361,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
 client.on(Events.MessageCreate, async (message) => {
     // Ignore bot messages
     if (message.author.bot) return;
+    
+    // Dedup guard: skip if already processed by another instance
+    if (isDuplicate(message.id)) return;
     
     // Debug: Log all messages in guilds
     if (message.guild) {
@@ -3429,6 +3452,9 @@ client.on(Events.MessageCreate, async (message) => {
 
 // Voice channel meeting tracking
 client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
+    // Dedup guard for voice events
+    const voiceEventId = `voice-${newState.id}-${Date.now().toString().slice(0, -3)}`;
+    if (isDuplicate(voiceEventId)) return;
     try {
         const userId = newState.id;
         const oldChannel = oldState.channel;
