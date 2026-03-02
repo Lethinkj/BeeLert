@@ -3984,12 +3984,29 @@ if (!BOT_TOKEN) {
     process.exit(1);
 }
 
-// Add timeout to detect if login hangs
+// Debug logging to diagnose connection issues
+client.on('debug', info => {
+    // Only log WebSocket-related messages to avoid spam
+    if (info.includes('Heartbeat') || info.includes('Session') || info.includes('Gateway') || info.includes('WS')) {
+        console.log('🔍 [DEBUG]', info);
+    }
+});
+
+client.on('error', error => {
+    console.error('🔍 [CLIENT ERROR]', error.message);
+});
+
+client.rest.on('rateLimited', (info) => {
+    console.warn('⚠️ [RATE LIMITED]', info);
+});
+
+// Add timeout to detect if login hangs (90 seconds for slow Render cold starts)
 const loginTimeout = setTimeout(() => {
-    console.error('❌ Discord login timeout - bot did not connect within 30 seconds');
+    console.error('❌ Discord login timeout - bot did not connect within 90 seconds');
     console.error('Token length:', BOT_TOKEN.length);
+    console.error('Token prefix:', BOT_TOKEN.substring(0, 10) + '...');
     process.exit(1);
-}, 30000); // 30 second timeout
+}, 90000); // 90 second timeout
 
 client.login(BOT_TOKEN)
     .then(() => {
@@ -3999,6 +4016,7 @@ client.login(BOT_TOKEN)
     .catch(error => {
         clearTimeout(loginTimeout);
         console.error('❌ Failed to login to Discord:', error.message);
+        console.error('Error code:', error.code);
         console.error('Error details:', error);
         console.error('Token present:', BOT_TOKEN ? 'Yes (length: ' + BOT_TOKEN.length + ')' : 'No');
         process.exit(1);
