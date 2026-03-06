@@ -3,7 +3,7 @@ const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1/chat/completions';
 
 // Default model - you can change this to any OpenRouter supported model
-const DEFAULT_MODEL = process.env.OPENROUTER_MODEL || 'google/gemini-2.0-flash-lite-001';
+const DEFAULT_MODEL = process.env.OPENROUTER_MODEL || 'google/gemini-2.5-pro';
 
 let isConfigured = false;
 

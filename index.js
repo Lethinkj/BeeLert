@@ -55,15 +55,29 @@ async function claimInstanceLock() {
 
 // Refresh lock every 15 seconds so other instances know we're alive
 setInterval(async () => {
-    if (!isPrimaryInstance || !supabaseService.isSupabaseConfigured()) return;
-    try {
-        const { supabase } = supabaseService;
-        await supabase
-            .from('heartbeat_logs')
-            .update({ last_ping: new Date().toISOString() })
-            .eq('bot_status', 'bot_instance_lock')
-            .eq('first_ping', INSTANCE_ID);
-    } catch (e) { /* ignore refresh errors */ }
+    if (!supabaseService.isSupabaseConfigured()) return;
+    if (isPrimaryInstance) {
+        // Primary: refresh the lock
+        try {
+            const { supabase } = supabaseService;
+            await supabase
+                .from('heartbeat_logs')
+                .update({ last_ping: new Date().toISOString() })
+                .eq('bot_status', 'bot_instance_lock')
+                .eq('first_ping', INSTANCE_ID);
+        } catch (e) { /* ignore refresh errors */ }
+    } else {
+        // Secondary: try to claim the lock if it went stale (primary died)
+        try {
+            const claimed = await claimInstanceLock();
+            if (claimed) {
+                console.log('🔄 Secondary instance promoted to PRIMARY — registering cron jobs...');
+                isPrimaryInstance = true;
+                botStatus.isOnline = true;
+                registerCronJobs();
+            }
+        } catch (e) { /* ignore promotion errors */ }
+    }
 }, 15000);
 
 console.log(`🆔 Instance ID: ${INSTANCE_ID} — if you see this twice, two instances are running!`);
@@ -102,7 +116,7 @@ const client = new Client({
 
 // Configuration from environment variables
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const CHANNEL_ID = process.env.CHANNEL_ID;
+const CHANNEL_ID = process.env.CHANNEL_ID || '1350324320496255102';
 const GEMINI_CHANNEL_ID = process.env.GEMINI_CHANNEL_ID;
 const STUDY_CHANNEL_ID = process.env.STUDY_CHANNEL_ID;
 const PROGRESS_CHANNEL_ID = process.env.PROGRESS_CHANNEL_ID || '1467890154164191343';
@@ -226,15 +240,11 @@ Use: 🌾Pongal 🕉️Hindu 🌙Muslim ✝️Christian 🎆NewYear 🇮🇳Nati
 Format: [{"name":"..","date":"DD/MM","emoji":"🎉","type":"hindu/muslim/christian/global"}]
 Use: 🪔Diwali 🐘Ganesh 🏹Dussehra 🔥Karthigai 🌙Muslim 🌼Onam 🎄Christmas 🇮🇳National`;
 
-        console.log('📡 Fetching Part 1 (Jan-Jun)...');
         const response1 = await aiService.askQuestion(prompt1);
         const festivals1 = parseJsonResponse(response1) || [];
-        console.log(`   Got ${festivals1.length} festivals`);
         
-        console.log('📡 Fetching Part 2 (Jul-Dec)...');
         const response2 = await aiService.askQuestion(prompt2);
         const festivals2 = parseJsonResponse(response2) || [];
-        console.log(`   Got ${festivals2.length} festivals`);
         
         const festivals = [...festivals1, ...festivals2];
         
@@ -244,28 +254,32 @@ Use: 🪔Diwali 🐘Ganesh 🏹Dussehra 🔥Karthigai 🌙Muslim 🌼Onam 🎄Ch
         }
         
         // Clear existing festivals for the year and add new ones
-        console.log(`📝 Storing ${festivals.length} festivals for ${year}...`);
-        
-        // Delete existing festivals
-        await supabaseService.clearFestivals();
+        // Delete existing festivals for the year
+        await supabaseService.clearFestivals(year);
         
         // Add new festivals
         for (const festival of festivals) {
             if (festival.name && festival.date) {
+                // Validate date format DD/MM
+                const dateMatch = festival.date.match(/^(\d{1,2})\/(\d{1,2})$/);
+                if (!dateMatch) {
+                    continue;
+                }
+                const formattedDate = `${dateMatch[1].padStart(2, '0')}/${dateMatch[2].padStart(2, '0')}`;
                 await supabaseService.addFestival(
                     festival.name,
-                    festival.date,
+                    formattedDate,
                     festival.emoji || '🎉',
-                    festival.type || 'global'
+                    festival.type || 'global',
+                    year
                 );
-                console.log(`   ✅ ${festival.emoji || '🎉'} ${festival.name} - ${festival.date}`);
             }
         }
         
         // Log the update
         await supabaseService.logFestivalUpdate(year, festivals.length);
         
-        console.log(`✅ Successfully updated festivals for ${year}`);
+        console.log(`✅ Successfully updated ${festivals.length} festivals for ${year}`);
         return true;
     } catch (error) {
         console.error('❌ Error fetching festivals:', error.message);
@@ -312,8 +326,6 @@ Do NOT include any other text, explanation, or markdown. Just the JSON object wi
             // Only return isToday: true if the AI's correctDate matches today exactly
             // Don't trust AI's isToday field - calculate it ourselves
             const isToday = correctDate === today;
-            
-            console.log(`   📅 AI says ${festival.name} is on ${correctDate}, today is ${today}, match: ${isToday}`);
             
             return {
                 isToday: isToday,
@@ -730,18 +742,111 @@ function parseNaturalLanguageMeeting(text) {
     };
 }
 
-// Get AI-generated motivational content
-async function getAIMotivation() {
-    try {
-        const motivation = await aiService.generateMotivation();
-        if (!motivation || motivation.trim().length === 0) {
-            return "Keep pushing forward! Your consistent efforts today build the success of tomorrow. 🚀";
-        }
-        return motivation;
-    } catch (error) {
-        console.error('Error generating AI motivation:', error);
-        return "Stay focused and keep learning! Every day is a new opportunity for growth. 💪";
-    }
+// 90 unique motivational quotes — rotates every 3 months so no repeats within a quarter
+const MOTIVATIONAL_QUOTES = [
+    "The secret of getting ahead is getting started. Small steps taken consistently will always outpace big leaps taken once in a while.",
+    "Success is not about perfection, it's about progress. Show up every single day and watch how far you go in just one month.",
+    "Your future self will thank you for the discipline you build today. Every hour you invest in learning compounds into something extraordinary.",
+    "Don't wait for motivation to strike. Discipline is doing the work even when you don't feel like it, and that's what separates winners.",
+    "The only way to do great work is to love what you do and keep showing up. Consistency beats talent when talent doesn't work hard.",
+    "Every expert was once a beginner who refused to quit. Keep learning, keep building, and trust the process of growth.",
+    "You are one decision away from a completely different life. Make today the day you choose to invest in yourself fully.",
+    "Progress is progress, no matter how small. A single line of code today is better than a thousand lines you planned but never wrote.",
+    "The pain of discipline weighs ounces while the pain of regret weighs tons. Choose the grind now and enjoy the rewards later.",
+    "Believe in your ability to figure things out. You don't need to know everything, you just need to keep learning and never stop.",
+    "Greatness is not born, it's built through daily habits. What you do every day matters more than what you do once in a while.",
+    "Stop comparing your chapter one to someone else's chapter twenty. Focus on your journey and celebrate every small victory along the way.",
+    "Hard work beats talent when talent doesn't work hard. Stay hungry, stay humble, and let your progress speak for itself.",
+    "The best time to start was yesterday. The second best time is right now. Don't let another day pass without moving forward.",
+    "You don't have to be great to start, but you have to start to be great. Take that first step today and keep going.",
+    "Dream big, start small, act now. The distance between your dreams and reality is called action, and action starts with today's update.",
+    "Success is the sum of small efforts repeated day in and day out. Your daily progress update is proof that you're building something amazing.",
+    "What you do today can improve all your tomorrows. Make each day count by learning something new and sharing it with the community.",
+    "The journey of a thousand miles begins with a single step. Your progress update today is that step. Keep walking, keep growing.",
+    "Champions are made in the hours that nobody sees. Every time you study, practice, and post your progress, you're building champion habits.",
+    "It's not about how fast you go, it's about not stopping. Slow progress is still progress, and consistency always wins in the long run.",
+    "Your only competition is who you were yesterday. If you learned one new thing today, you've already won. Keep that streak alive.",
+    "Opportunities don't happen, you create them. Every day you spend learning and growing is a day you're creating your future opportunities.",
+    "The difference between ordinary and extraordinary is that little extra effort every day. Push yourself just a bit more and watch the magic happen.",
+    "Don't count the days, make the days count. Your daily progress update is how you make every single day meaningful and productive.",
+    "Fall seven times, stand up eight. Resilience is the most important skill you can develop, and showing up daily is how you build it.",
+    "You're not behind, you're on your own timeline. What matters is that you keep moving forward and never let a day go to waste.",
+    "The grind you put in today is the glory you'll enjoy tomorrow. Stay focused, stay consistent, and trust the compound effect of daily work.",
+    "Knowledge is power, but applied knowledge is superpower. Take what you learn each day and put it into practice. That's real growth.",
+    "The only limit to your impact is your imagination and commitment. Keep dreaming big and working hard every single day without exception.",
+    "Success doesn't come from what you do occasionally, it comes from what you do consistently. Make your daily progress a non-negotiable habit.",
+    "Every master was once a disaster. Don't be afraid to make mistakes. Learn, grow, and share your journey with the community.",
+    "Your habits define your future. Building the habit of daily progress updates is building the foundation for long-term success and mastery.",
+    "Be so good they can't ignore you. The way to get there is by showing up every day, putting in the work, and tracking your growth.",
+    "Small daily improvements over time lead to stunning results. You won't see the change day to day, but month over month it's incredible.",
+    "The world rewards those who take action. Thinking about learning is not learning. Post your progress and prove to yourself you're moving forward.",
+    "Comfort is the enemy of progress. Step outside your comfort zone today, learn something challenging, and grow beyond what you thought was possible.",
+    "You are capable of amazing things. The only thing standing between you and your goals is the story you keep telling yourself. Change the story.",
+    "Rome wasn't built in a day, but they were laying bricks every hour. Your daily progress update is your brick. Keep building your empire.",
+    "The most powerful investment you can make is in yourself. Every moment spent learning today pays dividends for the rest of your life.",
+    "Don't let the fear of failure stop you from starting. Failure is just a stepping stone to success, and every step brings you closer.",
+    "Persistence and determination alone are omnipotent. When you feel like quitting, remember why you started and keep pushing through the resistance.",
+    "Today's efforts are tomorrow's results. The seeds you plant with your daily learning and practice will bloom into skills you never imagined.",
+    "You don't need a perfect plan to start. You just need to start and then adjust along the way. Progress over perfection, always.",
+    "The best version of you is built one day at a time. Each progress update is a building block in the masterpiece of your future.",
+    "Winners are not people who never fail but people who never quit. Keep showing up, keep trying, and success will find its way to you.",
+    "Your potential is endless. Don't let a bad day make you feel like you have a bad life. Reset, refocus, and keep moving forward.",
+    "Learning is not a destination, it's a lifelong journey. Enjoy the process, celebrate the small wins, and never stop being curious about the world.",
+    "What separates the good from the great is not talent, it's work ethic. Show up daily, do the hard things, and you'll become unstoppable.",
+    "The harder you work for something, the greater you'll feel when you achieve it. Keep grinding and let your progress tell your story.",
+    "Every day is a new chance to get better. Don't waste it. Learn something, build something, share something. That's the formula for growth.",
+    "You're not just learning for today, you're building the foundation for a lifetime of success. Every skill you develop now multiplies your future opportunities.",
+    "Discipline is choosing between what you want now and what you want most. Choose your goals over temporary comfort and watch yourself transform.",
+    "The road to success is always under construction. Embrace the challenges, learn from the setbacks, and keep building your path one day at a time.",
+    "Don't just dream about success, work for it every single day. Your daily progress update is proof that you're a doer, not just a dreamer.",
+    "Great things never come from comfort zones. Push yourself to learn something new today that scares you a little. That's where real growth happens.",
+    "Your streak is a reflection of your commitment. Whether it's day one or day hundred, every single update matters and every effort counts.",
+    "The person who moves a mountain begins by carrying away small stones. Start small, stay consistent, and you'll accomplish things beyond your imagination.",
+    "Innovation distinguishes between a leader and a follower. Think differently, learn passionately, and build fearlessly. The world needs what only you can create.",
+    "Success is walking from failure to failure with no loss of enthusiasm. Every mistake is a lesson, every setback is a setup for a comeback.",
+    "Time is your most valuable resource. Invest it wisely in learning and growing. You'll never regret the hours you spent developing yourself.",
+    "The difference between a stumbling block and a stepping stone is how you use it. Turn every challenge into a learning opportunity and keep climbing.",
+    "Your daily consistency is your competitive advantage. While others wait for the perfect moment, you're already building, learning, and growing every single day.",
+    "Be patient with yourself. Growth takes time, but if you keep showing up and putting in the effort, the results will exceed your expectations.",
+    "Knowledge without action is just information. Take what you learn and apply it immediately. That's how you turn knowledge into real, lasting skill.",
+    "The only person you should try to be better than is the person you were yesterday. Focus on your own growth and the rest will follow.",
+    "Every single day is an opportunity to become the person you want to be. Don't waste it waiting for Monday, start right now.",
+    "Your network is your net worth, but your skills are your real currency. Keep learning, keep growing, keep building your value every single day.",
+    "Success is not measured by what you accomplish, but by the obstacles you overcome. Every challenge you face is making you stronger and more capable.",
+    "The beautiful thing about learning is that nobody can take it away from you. Invest in your mind today when everyone else is investing in entertainment.",
+    "Motivation gets you started, but habits keep you going. Build the habit of daily progress and you'll achieve things you never thought were possible.",
+    "You're closer to your goals than you think. Every day you show up and put in the work, you're closing the gap between where you are and where you want to be.",
+    "The world doesn't reward those who know the most, it rewards those who do the most. Take action today and let your results speak louder than words.",
+    "Your future is created by what you do today, not tomorrow. Make every hour count, learn with intention, and let your progress inspire others.",
+    "Dedication is not what others expect of you, it's what you give yourself because you know you deserve greatness. Show up for yourself today.",
+    "The compound effect of daily learning is extraordinary. One year from now, you'll wish you had started today. So start today and never look back.",
+    "Excellence is not a skill, it's an attitude. Approach every task with the mindset of giving your best and your best will keep getting better.",
+    "You are the author of your own story. Make it a story worth telling by filling each chapter with growth, learning, and relentless determination.",
+    "Stay committed to your goals but flexible in your approach. The path to success isn't straight, but consistent effort will always get you there.",
+    "Challenges are what make life interesting and overcoming them is what makes life meaningful. Embrace today's challenges as tomorrow's achievements in disguise.",
+    "Don't let what you cannot do interfere with what you can do. Focus on your strengths, work on your weaknesses, and keep progressing daily.",
+    "The most successful people are those who are good at plan B. Stay adaptable, keep learning, and turn every obstacle into an opportunity for growth.",
+    "Your daily progress might seem small, but over weeks and months, it becomes a mountain of achievement. Trust the process and keep climbing higher.",
+    "Be the energy you want to attract. Show up with enthusiasm, learn with passion, and share your journey with the community. Together we rise.",
+    "What lies behind us and what lies before us are tiny matters compared to what lies within us. Unleash your potential one day at a time.",
+    "The only impossible journey is the one you never begin. Take the first step, then the next, and before you know it you'll be miles ahead.",
+    "You are braver than you believe, stronger than you seem, and smarter than you think. Prove it to yourself by showing up and doing the work.",
+    "Every sunrise brings a new opportunity to grow. Don't let the sun set on a day where you didn't learn something new or move forward.",
+    "The greatest glory in living lies not in never falling, but in rising every time we fall. Get back up, dust yourself off, and keep going."
+];
+
+/**
+ * Get a deterministic motivational quote for today — cycles every 90 days, no repeats within a quarter
+ * @returns {string} - Today's motivational quote
+ */
+function getDailyMotivation() {
+    const now = getISTTime();
+    // Day-of-year calculation
+    const start = new Date(now.getFullYear(), 0, 0);
+    const diff = now - start;
+    const dayOfYear = Math.floor(diff / (1000 * 60 * 60 * 24));
+    const index = dayOfYear % MOTIVATIONAL_QUOTES.length;
+    return MOTIVATIONAL_QUOTES[index];
 }
 
 // Ask Gemini AI a question
@@ -754,7 +859,7 @@ function scheduleMessageDeletion(message) {
     setTimeout(async () => {
         try {
             await message.delete();
-            console.log(`Deleted message from ${message.author.tag} after 24 hours`);
+            console.log(`Deleted message after 24 hours`);
         } catch (error) {
             console.error('Error deleting message:', error);
         }
@@ -925,7 +1030,6 @@ async function startAutomatedTracking(meeting, meetingId) {
                     totalSeconds: 0,
                     sessions: [] // Track multiple sessions if they disconnect/reconnect
                 });
-                console.log(`👤 ${member.user.username} - present at meeting start`);
             }
         });
         
@@ -946,14 +1050,14 @@ async function startAutomatedTracking(meeting, meetingId) {
                 const event = await guild.scheduledEvents.fetch(meeting.eventId);
                 if (event && event.status === 1) { // 1 = SCHEDULED
                     await event.setStatus(2); // 2 = ACTIVE
-                    console.log(`📶 Discord event updated to ACTIVE: ${meeting.topic}`);
+                    console.log(`📶 Discord event started: ${meeting.topic}`);
                 }
             } catch (err) {
                 console.error('Error updating Discord event status:', err);
             }
         }
         
-        console.log(`🎬 Started tracking: ${meeting.topic} in ${meeting.channelName} (${participants.size} already present)`);
+        console.log(`🎬 Started tracking: ${meeting.topic}`);
         
         // Notify in general channel with channel link
         const generalChannel = await client.channels.fetch(CHANNEL_ID);
@@ -1183,6 +1287,10 @@ function formatISTDate(date) {
 // Send daily progress update
 async function sendDailyUpdate() {
     try {
+        if (!CHANNEL_ID) {
+            console.error('Error: CHANNEL_ID environment variable not set');
+            return;
+        }
         const channel = await client.channels.fetch(CHANNEL_ID);
         if (!channel) {
             console.error(`Error: Could not find channel with ID ${CHANNEL_ID}`);
@@ -1199,10 +1307,10 @@ async function sendDailyUpdate() {
 
         const now = getISTTime();
         const currentTime = formatISTTime(now);
-        const dailyQuote = await getAIMotivation();
+        const dailyQuote = getDailyMotivation();
 
         const message = `${role} Heyyy everyone! Hope everyone is fine! 😊\n\n` +
-            `This is a gentle reminder to post your daily progress. 📝\n\n` +
+            `This is a gentle reminder to update your daily progress. 📝\n\n` +
             `💡 **Today's Motivation:**\n` +
             `_${dailyQuote}_`;
 
@@ -1213,40 +1321,11 @@ async function sendDailyUpdate() {
     }
 }
 
-// Bot ready event
-client.once(Events.ClientReady, async (c) => {
-    try {
-        console.log(`${c.user.tag} has connected to Discord!`);
-        console.log(`Bot is ready at ${formatISTTime(getISTTime())}`);
-
-        // === INSTANCE LOCK: Only one instance should be active ===
-        isPrimaryInstance = await claimInstanceLock();
-        if (!isPrimaryInstance) {
-            console.log('🛑 This instance is SECONDARY — it will NOT process events or run cron jobs.');
-            console.log('   To fix: stop the duplicate process on Replit (check Run vs Deploy).');
-            botStatus.isOnline = false;
-            return; // Skip all setup — let the primary instance handle everything
-        }
-
-        // Update bot status
-        botStatus.isOnline = true;
-        botStatus.connectedAt = new Date().toISOString();
-        
-        // Load daily reminders from database
-        await loadRemindersFromDatabase();
-
-    // Register slash commands
-    try {
-        console.log('Registering slash commands...');
-        const rest = new REST({ version: '10' }).setToken(BOT_TOKEN);
-        await rest.put(
-            Routes.applicationCommands(c.user.id),
-            { body: commands }
-        );
-        console.log('✅ Slash commands registered successfully!');
-    } catch (error) {
-        console.error('Error registering slash commands:', error);
-    }
+// Extracted cron registration so secondary→primary promotion can also call it
+let cronJobsRegistered = false;
+async function registerCronJobs() {
+    if (cronJobsRegistered) return;
+    cronJobsRegistered = true;
 
     // Schedule daily update at 9:00 PM IST (21:00)
     // Cron format: minute hour * * *
@@ -1260,11 +1339,10 @@ client.once(Events.ClientReady, async (c) => {
         timezone: 'Asia/Kolkata'
     });
 
-    console.log('Daily scheduler started - will post at 9:00 PM IST every day');
+    console.log('Daily scheduler started');
     
     // Schedule birthday checker (runs daily at 7:00 AM IST)
     cron.schedule('0 7 * * *', async () => {
-        console.log('Running daily birthday check at 7:00 AM IST...');
         
         const now = getISTTime();
         // getISTTime() already returns IST-adjusted time, use direct methods
@@ -1297,7 +1375,7 @@ client.once(Events.ClientReady, async (c) => {
                         `— With love from the Aura-7F fam 💙`;
                     
                     await channel.send(wishMessage);
-                    console.log(`✅ Posted AI birthday wish for ${person.name}`);
+                    console.log(`✅ Posted birthday wish for ${person.name}`);
                 } catch (error) {
                     console.error(`Error posting birthday wish for ${person.name}:`, error);
                 }
@@ -1307,19 +1385,15 @@ client.once(Events.ClientReady, async (c) => {
         timezone: 'Asia/Kolkata'
     });
     
-    console.log('Birthday checker started - will check daily at 7:00 AM IST');
+    console.log('Birthday checker started');
     
     // Schedule festival checker (runs daily at 8:00 AM IST)
     cron.schedule('0 8 * * *', async () => {
-        console.log('Running daily festival check at 8:00 AM IST...');
-        
         const now = getISTTime();
         const day = now.getDate().toString().padStart(2, '0');
         const month = (now.getMonth() + 1).toString().padStart(2, '0');
         const year = now.getFullYear();
         const today = `${day}/${month}`; // DD/MM format
-        
-        console.log(`📅 Today's date (IST): ${today}/${year}`);
         
         // Find today's festivals from Supabase (only those that match today's date exactly)
         const allFestivals = await getFestivals();
@@ -1337,23 +1411,18 @@ client.once(Events.ClientReady, async (c) => {
         // Verify lunar calendar festivals that are supposedly today
         // Remove any that AI says are NOT actually today
         for (const festival of todaysFestivals.filter(f => lunarFestivals.some(lf => lf.name === f.name))) {
-            console.log(`🔍 Verifying stored date for ${festival.name} (stored: ${festival.date})...`);
             const verification = await verifyFestivalDate(festival, today, year);
             
             // Validate that AI returned a real date format (DD/MM), not literal text
             if (verification.correctDate && /^\d{2}\/\d{2}$/.test(verification.correctDate)) {
                 // If AI says the correct date is different from today, remove this festival
                 if (verification.correctDate !== today) {
-                    console.log(`❌ ${festival.name} is NOT today. AI says correct date is ${verification.correctDate}`);
                     todaysFestivals = todaysFestivals.filter(f => f.name !== festival.name);
                     
                     // Update the stored date for future reference
                     await updateFestivalDate(festival.name, verification.correctDate);
-                } else {
-                    console.log(`✅ Confirmed: ${festival.name} is today!`);
                 }
             } else {
-                console.log(`⚠️ AI returned invalid date for ${festival.name}: ${verification.correctDate} - removing to be safe`);
                 todaysFestivals = todaysFestivals.filter(f => f.name !== festival.name);
             }
         }
@@ -1362,23 +1431,18 @@ client.once(Events.ClientReady, async (c) => {
         // (in case the stored date was wrong)
         for (const festival of lunarFestivals) {
             if (!todaysFestivals.find(f => f.name === festival.name) && festival.date !== today) {
-                console.log(`🔍 Checking if ${festival.name} (stored: ${festival.date}) might be today...`);
                 const verification = await verifyFestivalDate(festival, today, year);
                 
                 // Validate AI returned a real date format
                 if (verification.correctDate && /^\d{2}\/\d{2}$/.test(verification.correctDate)) {
                     // Only add if AI confirms the correct date IS today
                     if (verification.correctDate === today) {
-                        console.log(`✅ AI confirmed ${festival.name} is actually today!`);
                         todaysFestivals.push(festival);
                         await updateFestivalDate(festival.name, verification.correctDate);
                     } else if (verification.correctDate !== festival.date) {
                         // Update stored date for future reference
-                        console.log(`📅 Updating ${festival.name} date from ${festival.date} to ${verification.correctDate}`);
                         await updateFestivalDate(festival.name, verification.correctDate);
                     }
-                } else {
-                    console.log(`⚠️ AI returned invalid date for ${festival.name}: ${verification.correctDate}`);
                 }
             }
         }
@@ -1415,7 +1479,7 @@ client.once(Events.ClientReady, async (c) => {
                         `— Wishing you joy and prosperity from the Aura-7F fam 💙`;
                     
                     await channel.send(festivalMessage);
-                    console.log(`✅ Posted AI festival wish for ${festival.name}`);
+                    console.log(`✅ Posted festival wish for ${festival.name}`);
                 } catch (error) {
                     console.error(`Error posting festival wish for ${festival.name}:`, error);
                 }
@@ -1427,28 +1491,26 @@ client.once(Events.ClientReady, async (c) => {
         timezone: 'Asia/Kolkata'
     });
     
-    console.log('Festival checker started - will check daily at 8:00 AM IST');
+    console.log('Festival checker started');
     
     // Schedule database heartbeat (runs every 6 hours to keep Supabase active)
     cron.schedule('0 */6 * * *', async () => {
-        console.log('Writing database heartbeat...');
         await supabaseService.writeHeartbeat();
     }, {
         timezone: 'Asia/Kolkata'
     });
     
-    console.log('Database heartbeat scheduler started - will ping every 6 hours');
+    console.log('Database heartbeat scheduler started');
     
     // Schedule yearly festival update (runs on January 2nd at 6:00 AM IST)
     cron.schedule('0 6 2 1 *', async () => {
         const year = new Date().getFullYear();
-        console.log(`🎉 Running yearly festival update for ${year}...`);
         await fetchAndStoreFestivals(year);
     }, {
         timezone: 'Asia/Kolkata'
     });
     
-    console.log('Yearly festival updater scheduled - will run on January 2nd');
+    console.log('Yearly festival updater scheduled');
     
     // Monthly leaderboard is now only available via /leaderboard command (not auto-posted)
     
@@ -1470,7 +1532,7 @@ client.once(Events.ClientReady, async (c) => {
                     // Update tracking
                     tracking.lastPointsAwarded = now;
                     
-                    console.log(`🎯 Periodic: ${tracking.username} earned ${pointsToAward} points in ${tracking.channelName}`);
+                    console.log(`🎯 Periodic: ${tracking.username} earned ${pointsToAward} pts`);
                 } catch (error) {
                     console.error(`Error awarding periodic points to ${tracking.username}:`, error);
                 }
@@ -1478,11 +1540,10 @@ client.once(Events.ClientReady, async (c) => {
         }
     }, POINTS_INTERVAL);
     
-    console.log('Voice points tracker started - checking every 5 minutes');
+    console.log('Voice points tracker started');
     
     // Write initial heartbeat on startup
     setTimeout(async () => {
-        console.log('Writing startup heartbeat to database...');
         await supabaseService.writeHeartbeat();
     }, 3000);
     
@@ -1492,16 +1553,12 @@ client.once(Events.ClientReady, async (c) => {
         const lastUpdate = await supabaseService.getLastFestivalUpdate();
         
         if (!lastUpdate || lastUpdate.year < currentYear) {
-            console.log(`🎉 Festivals need update for ${currentYear}. Fetching...`);
             await fetchAndStoreFestivals(currentYear);
-        } else {
-            console.log(`✅ Festivals already updated for ${currentYear}`);
         }
     }, 5000);
     
     // Check birthdays on bot startup (backup in case bot started after 7 AM)
     setTimeout(async () => {
-        console.log('Running startup birthday check (backup)...');
         const now = getISTTime();
         // getISTTime() already returns IST-adjusted time, use direct methods
         const day = now.getDate().toString().padStart(2, '0');
@@ -1532,26 +1589,21 @@ client.once(Events.ClientReady, async (c) => {
                         `— With love from the Aura-7F fam 💙`;
                     
                     await channel.send(wishMessage);
-                    console.log(`✅ Posted startup birthday wish for ${person.name}`);
                 } catch (error) {
                     console.error(`Error posting startup birthday wish:`, error);
                 }
             }
         } else {
-            console.log(`No birthdays today (${today})`);
         }
     }, 5000); // Wait 5 seconds after bot is ready
     
     // Check festivals on bot startup (backup in case bot started after 8 AM)
     setTimeout(async () => {
-        console.log('Running startup festival check (backup)...');
         const now = getISTTime();
         const day = now.getDate().toString().padStart(2, '0');
         const month = (now.getMonth() + 1).toString().padStart(2, '0');
         const year = now.getFullYear();
         const today = `${day}/${month}`; // DD/MM format
-        
-        console.log(`📅 Startup check - Today's date (IST): ${today}/${year}`);
         
         // Fetch festivals from Supabase
         const allFestivals = await getFestivals();
@@ -1567,20 +1619,15 @@ client.once(Events.ClientReady, async (c) => {
         
         // Verify lunar festivals that are supposedly today - remove if AI says otherwise
         for (const festival of todaysFestivals.filter(f => lunarFestivals.some(lf => lf.name === f.name))) {
-            console.log(`🔍 Startup: Verifying ${festival.name} (stored: ${festival.date})...`);
             const verification = await verifyFestivalDate(festival, today, year);
             
             // Validate that AI returned a real date, not literal "DD/MM"
             if (verification.correctDate && /^\d{2}\/\d{2}$/.test(verification.correctDate)) {
                 if (verification.correctDate !== today) {
-                    console.log(`❌ ${festival.name} is NOT today. AI says correct date is ${verification.correctDate}`);
                     todaysFestivals = todaysFestivals.filter(f => f.name !== festival.name);
                     await updateFestivalDate(festival.name, verification.correctDate);
-                } else {
-                    console.log(`✅ Confirmed: ${festival.name} is today!`);
                 }
             } else {
-                console.log(`⚠️ AI returned invalid date for ${festival.name}: ${verification.correctDate}`);
                 // Don't post if we can't verify - remove from today's list to be safe
                 todaysFestivals = todaysFestivals.filter(f => f.name !== festival.name);
             }
@@ -1588,7 +1635,7 @@ client.once(Events.ClientReady, async (c) => {
         
         // Don't check for festivals NOT in today's list on startup - that's the job of the 8 AM cron
         
-        if (todaysFestivals.length > 0) {
+        if (todaysFestivals.length > 0 && CHANNEL_ID) {
             const channel = await client.channels.fetch(CHANNEL_ID);
             
             for (const festival of todaysFestivals) {
@@ -1619,13 +1666,11 @@ client.once(Events.ClientReady, async (c) => {
                         `— Wishing you joy and prosperity from the Aura-7F fam 💙`;
                     
                     await channel.send(festivalMessage);
-                    console.log(`✅ Posted startup festival wish for ${festival.name}`);
                 } catch (error) {
                     console.error(`Error posting startup festival wish:`, error);
                 }
             }
         } else {
-            console.log(`No festivals today (${today})`);
         }
     }, 7000); // Wait 7 seconds after bot is ready
     
@@ -1635,15 +1680,8 @@ client.once(Events.ClientReady, async (c) => {
         // Since getISTTime() already returns IST-adjusted time, use direct methods
         const currentTime = `${now.getHours()}:${now.getMinutes().toString().padStart(2, '0')}`;
         
-        // Debug log every minute (comment out after testing)
-        if (userReminders.size > 0) {
-            console.log(`⏰ Checking reminders at IST: ${currentTime}`);
-        }
-        
         for (const [userId, settings] of userReminders.entries()) {
             if (!settings.active) continue;
-            
-            console.log(`   Comparing: "${settings.time}" vs "${currentTime}" for user ${userId}`);
             
             if (settings.time !== currentTime) continue;
             
@@ -1666,7 +1704,7 @@ client.once(Events.ClientReady, async (c) => {
         timezone: 'Asia/Kolkata'
     });
     
-    console.log('Personal reminder checker started - runs every minute');
+    console.log('Personal reminder checker started');
     
     // Schedule automated meeting tracking checker (runs every minute)
     cron.schedule('* * * * *', async () => {
@@ -1690,14 +1728,14 @@ client.once(Events.ClientReady, async (c) => {
             // FIRST CHECK: Has scheduled end time been reached?
             if (!activeMeeting.scheduledSummaryPosted && scheduledMeeting.endTime.getTime() <= now) {
                 // Post first summary for scheduled period
-                console.log(`⏰ ${activeMeeting.topic}: Scheduled time ended - posting scheduled period summary`);
+                console.log(`⏰ ${activeMeeting.topic}: Scheduled time ended`);
                 await generateScheduledPeriodSummary(activeMeeting, meetingId, scheduledMeeting.endTime);
                 activeMeeting.scheduledSummaryPosted = true;
                 
                 // Check if anyone is still in the channel
                 if (currentMembers.size > 0) {
                     activeMeeting.waitingForEmpty = true;
-                    console.log(`👥 ${activeMeeting.topic}: ${currentMembers.size} members still present - waiting for all to leave`);
+                    console.log(`👥 ${activeMeeting.topic}: ${currentMembers.size} still present`);
                     
                     // Notify in meeting summary channel that we're waiting
                     const summaryChannel = await client.channels.fetch(MEETING_SUMMARY_CHANNEL_ID);
@@ -1710,14 +1748,14 @@ client.once(Events.ClientReady, async (c) => {
                     );
                 } else {
                     // No one left, end immediately
-                    console.log(`✅ ${activeMeeting.topic}: Channel empty at scheduled end - ending meeting`);
+                    console.log(`✅ ${activeMeeting.topic}: Channel empty - ending meeting`);
                     await finalizeAndCleanup(meetingId);
                 }
             }
             
             // SECOND CHECK: If waiting for empty channel, check if it's empty now
             if (activeMeeting.waitingForEmpty && currentMembers.size === 0) {
-                console.log(`✅ ${activeMeeting.topic}: All participants have left - posting final summary`);
+                console.log(`✅ ${activeMeeting.topic}: All left - posting final summary`);
                 await generateFinalSummary(activeMeeting, meetingId);
                 await finalizeAndCleanup(meetingId);
             }
@@ -1726,16 +1764,89 @@ client.once(Events.ClientReady, async (c) => {
         timezone: 'Asia/Kolkata'
     });
     
-    console.log('Automated meeting tracking started - checks every minute');
+    console.log('Automated meeting tracking started');
     
     // Post Meeting Manager interface in schedule meet channel
     try {
         const scheduleChannel = await client.channels.fetch(SCHEDULE_MEET_CHANNEL_ID);
         await postMeetingManager(scheduleChannel);
-        console.log('📅 Meeting Manager interface posted in schedule channel');
+        console.log(`📋 Meeting Manager posted`);
     } catch (error) {
         console.error('Error posting meeting manager:', error);
     }
+
+    // Startup backup: check if daily update needs to be sent (in case bot was down at 9 PM)
+    setTimeout(async () => {
+        if (!CHANNEL_ID) { console.log('⚠️ CHANNEL_ID not set, skipping startup daily update check'); return; }
+        try {
+            const now = getISTTime();
+            const hour = now.getHours();
+            // If it's past 9 PM IST, check if daily update was already sent today
+            if (hour >= 21) {
+                const channel = await client.channels.fetch(CHANNEL_ID);
+                if (channel) {
+                    const recentMessages = await channel.messages.fetch({ limit: 20 });
+                    const todayStart = new Date(now);
+                    todayStart.setHours(0, 0, 0, 0);
+                    const alreadySent = recentMessages.some(msg =>
+                        msg.author.id === client.user.id &&
+                        msg.createdTimestamp >= todayStart.getTime() &&
+                        msg.content.includes('gentle reminder to post your daily progress')
+                    );
+                    if (!alreadySent) {
+                        console.log('📢 Startup backup: Daily update not sent today, sending now...');
+                        await sendDailyUpdate();
+                    } else {
+                        console.log('✅ Startup backup: Daily update already sent today');
+                    }
+                }
+            }
+        } catch (error) {
+            console.error('Error in startup daily update check:', error);
+        }
+    }, 12000);
+
+    console.log('✅ All cron jobs and startup checks registered');
+}
+
+// Bot ready event
+client.once(Events.ClientReady, async (c) => {
+    try {
+        console.log(`${c.user.tag} has connected to Discord!`);
+        console.log(`Bot is ready at ${formatISTTime(getISTTime())}`);
+
+        // === INSTANCE LOCK: Only one instance should be active ===
+        isPrimaryInstance = await claimInstanceLock();
+        if (!isPrimaryInstance) {
+            console.log('🛑 This instance is SECONDARY — it will NOT process events or run cron jobs.');
+            console.log('   Will retry every 15s in case primary dies.');
+            botStatus.isOnline = false;
+            return; // Skip all setup — let the primary instance handle everything
+        }
+
+        // Update bot status
+        botStatus.isOnline = true;
+        botStatus.connectedAt = new Date().toISOString();
+        
+        // Load daily reminders from database
+        await loadRemindersFromDatabase();
+
+        // Register slash commands
+        try {
+            console.log('Registering slash commands...');
+            const rest = new REST({ version: '10' }).setToken(BOT_TOKEN);
+            await rest.put(
+                Routes.applicationCommands(c.user.id),
+                { body: commands }
+            );
+            console.log('✅ Slash commands registered successfully!');
+        } catch (error) {
+            console.error('Error registering slash commands:', error);
+        }
+
+        // Register all cron jobs and startup checks
+        await registerCronJobs();
+
     } catch (readyHandlerError) {
         console.error('❌ Error in Discord ready event handler:', readyHandlerError);
         console.error('Stack:', readyHandlerError.stack);
@@ -1755,7 +1866,7 @@ client.on(Events.GuildMemberAdd, async (member) => {
             const guestRole = guild.roles.cache.get(GUEST_ROLE_ID);
             if (guestRole) {
                 await member.roles.add(guestRole);
-                console.log(`✅ Assigned guest role "${guestRole.name}" to ${member.user.tag}`);
+                console.log(`✅ Assigned guest role to ${member.user.tag}`);
             } else {
                 console.error(`❌ Guest role with ID ${GUEST_ROLE_ID} not found in server.`);
             }
@@ -2434,24 +2545,15 @@ client.on(Events.MessageCreate, async (message) => {
     // Dedup guard: skip if already processed by another instance
     if (isDuplicate(message.id)) return;
     
-    // Debug: Log all messages in guilds
-    if (message.guild) {
-        const parentId = message.channel.parentId || message.channel.id;
-        const isThread = message.channel.isThread();
-        console.log(`💬 Message from ${message.author.username} in ${isThread ? 'thread' : 'channel'} ${message.channel.id} (Parent: ${parentId}, Progress: ${PROGRESS_CHANNEL_ID})`);
-    }
-    
     // Handle progress updates in the PROGRESS_CHANNEL_ID (including threads)
-    const channelId = message.channel.parentId || message.channel.id; // Get parent channel if in thread
-    if (channelId === PROGRESS_CHANNEL_ID && !message.content.startsWith('!')) {
-        console.log(`📝 Message in progress channel from ${message.author.username}`);
-        
+    const isProgressChannel = message.channel.id === PROGRESS_CHANNEL_ID || 
+                              message.channel.parentId === PROGRESS_CHANNEL_ID;
+    if (isProgressChannel && !message.content.startsWith('!')) {
         // Check if message is in a thread
         if (message.channel.isThread()) {
             // Verify user is posting in their own thread
             const threadOwnerId = message.channel.ownerId;
             if (threadOwnerId !== message.author.id) {
-                console.log(`⚠️ User ${message.author.username} posting in someone else's thread`);
                 const reply = await message.reply("⚠️ Please post your progress update in your own thread to earn points!");
                 setTimeout(() => reply.delete().catch(() => {}), 10000);
                 return;
@@ -2465,13 +2567,9 @@ client.on(Events.MessageCreate, async (message) => {
         
         // Check if user has the ROOKIE_ROLE_ID
         const member = message.member;
-        console.log(`👤 Member roles:`, member ? Array.from(member.roles.cache.keys()) : 'No member');
-        console.log(`🔍 Looking for rookie role: ${ROOKIE_ROLE_ID}`);
         if (!member || !member.roles.cache.has(ROOKIE_ROLE_ID)) {
-            console.log(`⚠️ User ${message.author.username} doesn't have rookie role (ID: ${ROOKIE_ROLE_ID})`);
             return; // Ignore messages from users without the rookie role
         }
-        console.log(`✅ User ${message.author.username} has rookie role, processing progress update...`);
         
         try {
             // Get IST date for today
@@ -2522,7 +2620,7 @@ client.on(Events.MessageCreate, async (message) => {
             // React with green tick to verified progress post
             await message.react('✅').catch(() => {});
             
-            console.log(`✅ Progress update recorded for ${message.author.username}, Streak: ${result.current_streak}`);
+            console.log(`✅ Progress update recorded for ${message.author.username}`);
             
         } catch (error) {
             console.error('❌ Error handling progress update:', error);
@@ -2530,9 +2628,6 @@ client.on(Events.MessageCreate, async (message) => {
         
         return; // Stop here for progress channel messages
     }
-    
-    // Handle bot messages
-    if (message.author.bot) return;
     
     // Handle DMs (personal reminders)
     if (!message.guild) {
@@ -2611,7 +2706,7 @@ client.on(Events.MessageCreate, async (message) => {
                             active: true
                         });
                         
-                        console.log(`⏰ Natural language reminder set for ${message.author.username} at ${timeString} IST (saved to DB)`);
+                console.log(`⏰ Reminder set for ${message.author.username} at ${timeString} IST`);
                         
                         // Add to history
                         addToHistory(userId, 'user', message.content);
@@ -2761,7 +2856,7 @@ client.on(Events.MessageCreate, async (message) => {
                     "**Commands:** Type `!help` to see all commands"
                 );
                 
-                console.log(`✅ Reminder created for ${message.author.username} at ${state.time} (saved to DB)`);
+                console.log(`✅ Reminder created for ${message.author.username} at ${state.time}`);
                 return;
             }
             
@@ -2846,7 +2941,7 @@ client.on(Events.MessageCreate, async (message) => {
                 await supabaseService.deleteDailyReminder(userId);
                 userReminders.delete(userId);
                 await message.reply("❌ Daily reminder deleted. Type `reminder` anytime to set up again.");
-                console.log(`🗑️ Reminder deleted for ${message.author.username} (removed from DB)`);
+                console.log(`🗑️ Reminder deleted for ${message.author.username}`);
                 return;
             }
             
@@ -3417,14 +3512,11 @@ client.on(Events.MessageCreate, async (message) => {
     
     // !checkbirthday command (manual trigger for testing)
     if (message.content === '!checkbirthday') {
-        console.log('Manual birthday check triggered by', message.author.tag);
         const now = getISTTime();
         // getISTTime() already returns IST-adjusted time, use direct methods
         const day = now.getDate().toString().padStart(2, '0');
         const month = (now.getMonth() + 1).toString().padStart(2, '0');
         const today = `${day}/${month}`; // DD/MM format
-        
-        console.log(`Current IST Date: ${today}`);
         
         // Fetch birthdays from Supabase
         const allBirthdays = await getBirthdays();
@@ -3579,13 +3671,6 @@ async function handleScheduledMeetingTracking(userId, oldState, newState) {
                 participant.joinedAt = now;
                 participant.leftAt = null;
             }
-            
-            // If in continuous mode and someone joins, keep tracking
-            if (meeting.trackingMode === 'continuous') {
-                console.log(`➕ ${username} joined ${meeting.topic} (continuing tracking)`);
-            } else {
-                console.log(`➕ ${username} joined ${meeting.topic} (scheduled meeting)`);
-            }
         }
         
         // User LEFT the monitored meeting channel
@@ -3600,9 +3685,6 @@ async function handleScheduledMeetingTracking(userId, oldState, newState) {
                     leftAt: now,
                     duration: sessionDuration
                 });
-                
-                const minutes = Math.floor(sessionDuration / 60);
-                console.log(`➖ ${username} left ${meeting.topic} (session: ${minutes}m ${sessionDuration % 60}s)`);
             }
         }
     }
@@ -3626,7 +3708,6 @@ async function handleVoiceJoin(userId, channel) {
             username: username,
             lastPointsAwarded: now
         });
-        console.log(`🎯 Started tracking points for ${username} in ${channel.name}`);
     }
     
     // ===== LOUNGE MEETING TRACKING (ORIGINAL) =====
@@ -3662,7 +3743,6 @@ async function handleVoiceJoin(userId, channel) {
     }
     
     meeting.lastActivity = now;
-    console.log(`👤 ${username} joined ${channel.name}`);
 }
 
 async function handleVoiceLeave(userId, channel) {
@@ -3686,12 +3766,11 @@ async function handleVoiceLeave(userId, channel) {
                 await supabaseService.addVoicePoints(userId, tracking.username, pointsEarned, totalMinutes);
                 // Log the session
                 await supabaseService.logVoiceSession(userId, tracking.username, tracking.channelId, tracking.channelName, totalMinutes, pointsEarned);
-                console.log(`🎯 ${tracking.username} earned ${pointsEarned} points for ${totalMinutes} minutes in ${tracking.channelName}`);
+                console.log(`🎯 ${tracking.username} earned ${pointsEarned} pts for ${totalMinutes}m`);
             } catch (error) {
                 console.error('Error saving voice points:', error);
             }
         } else {
-            console.log(`🎯 ${tracking.username} left after ${totalMinutes} minutes (no points - less than 5 min)`);
         }
         
         voicePointsTracking.delete(userId);
@@ -3834,8 +3913,6 @@ client.once(Events.ClientReady, async () => {
     try {
         // Fetch all guilds
         for (const [guildId, guild] of client.guilds.cache) {
-            console.log(`🔍 Checking scheduled events in guild: ${guild.name}`);
-            
             // Fetch all scheduled events
             const events = await guild.scheduledEvents.fetch();
             
@@ -3850,10 +3927,8 @@ client.once(Events.ClientReady, async () => {
                 
                 // Delete all past bot-created events regardless of status
                 if (isBotEvent && endTime && endTime < now) {
-                    console.log(`🧹 Deleting past bot event: ${event.name} (ended ${Math.round((now - endTime) / 60000)} min ago)`);
                     try {
                         await event.delete();
-                        console.log(`✅ Deleted past event: ${event.name}`);
                     } catch (err) {
                         console.error(`Error deleting event ${event.name}:`, err.message);
                     }
@@ -3863,10 +3938,8 @@ client.once(Events.ClientReady, async () => {
                 // Clean up old COMPLETED or CANCELED events (status 3 or 4)
                 if (event.entityType === GuildScheduledEventEntityType.Voice && 
                     (event.status === 3 || event.status === 4)) {
-                    console.log(`🧹 Cleaning up old ${event.status === 3 ? 'COMPLETED' : 'CANCELED'} event: ${event.name}`);
                     try {
                         await event.delete();
-                        console.log(`✅ Deleted old event: ${event.name}`);
                     } catch (err) {
                         console.error(`Error deleting event ${event.name}:`, err.message);
                     }
@@ -3876,11 +3949,9 @@ client.once(Events.ClientReady, async () => {
                 // Clean up stale ACTIVE events that should have ended
                 if (event.entityType === GuildScheduledEventEntityType.Voice && 
                     event.status === 2 && endTime && endTime < now) {
-                    console.log(`🧹 Cleaning up stale ACTIVE event: ${event.name} (ended ${Math.round((now - endTime) / 60000)} min ago)`);
                     try {
                         await event.setStatus(3); // Mark as COMPLETED
                         await event.delete();
-                        console.log(`✅ Cleaned up stale event: ${event.name}`);
                     } catch (err) {
                         console.error(`Error cleaning up event ${event.name}:`, err.message);
                     }
@@ -3890,10 +3961,8 @@ client.once(Events.ClientReady, async () => {
                 // Clean up SCHEDULED events that are past their end time
                 if (event.entityType === GuildScheduledEventEntityType.Voice && 
                     event.status === 1 && endTime && endTime < now) {
-                    console.log(`🧹 Cleaning up expired SCHEDULED event: ${event.name} (ended ${Math.round((now - endTime) / 60000)} min ago)`);
                     try {
                         await event.delete();
-                        console.log(`✅ Deleted expired event: ${event.name}`);
                     } catch (err) {
                         console.error(`Error deleting event ${event.name}:`, err.message);
                     }
@@ -3910,8 +3979,6 @@ client.once(Events.ClientReady, async () => {
                         
                         // Check if meeting should be active now
                         if (startTime <= now && endTime > now && event.status === 2) {
-                            console.log(`🔄 Restoring ACTIVE meeting: ${event.name}`);
-                            
                             // Start tracking immediately
                             const channel = await client.channels.fetch(event.channelId);
                             if (channel) {
@@ -3930,11 +3997,9 @@ client.once(Events.ClientReady, async () => {
                                 
                                 // Start tracking
                                 await startAutomatedTracking(scheduledMeetings.get(meetingId), meetingId);
-                                console.log(`✅ Resumed tracking: ${event.name}`);
                             }
                         } else if (startTime > now) {
                             // Future meeting - restore to scheduled meetings
-                            console.log(`📅 Restoring scheduled meeting: ${event.name}`);
                             
                             const channel = await client.channels.fetch(event.channelId);
                             scheduledMeetings.set(meetingId, {
@@ -3948,8 +4013,6 @@ client.once(Events.ClientReady, async () => {
                                 status: 'scheduled',
                                 eventId: eventId
                             });
-                            
-                            console.log(`✅ Restored: ${event.name} (starts at ${new Date(startTime).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })})`);
                         }
                     }
                 }
@@ -3983,14 +4046,6 @@ if (!BOT_TOKEN) {
     console.error('❌ BOT_TOKEN is not set in environment variables!');
     process.exit(1);
 }
-
-// Debug logging to diagnose connection issues
-client.on('debug', info => {
-    // Only log WebSocket-related messages to avoid spam
-    if (info.includes('Heartbeat') || info.includes('Session') || info.includes('Gateway') || info.includes('WS')) {
-        console.log('🔍 [DEBUG]', info);
-    }
-});
 
 client.on('error', error => {
     console.error('🔍 [CLIENT ERROR]', error.message);

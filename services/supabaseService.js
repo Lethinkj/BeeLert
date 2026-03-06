@@ -149,12 +149,15 @@ async function getFestivals() {
  * @param {string} type - Festival type (global/south_indian)
  * @returns {Promise<Object|null>} - Created festival or null
  */
-async function addFestival(name, date, emoji, type) {
+async function addFestival(name, date, emoji, type, year = null) {
     if (!isConfigured) return null;
+    
+    const record = { name, date, emoji, type };
+    if (year) record.year = year;
     
     const { data, error } = await supabase
         .from('festivals')
-        .insert([{ name, date, emoji, type }])
+        .insert([record])
         .select()
         .single();
     
@@ -189,19 +192,26 @@ async function deleteFestival(festivalId) {
  * Clear all festivals from database
  * @returns {Promise<boolean>} - Success status
  */
-async function clearFestivals() {
+async function clearFestivals(year = null) {
     if (!isConfigured) return false;
     
-    const { error } = await supabase
+    let query = supabase
         .from('festivals')
-        .delete()
-        .neq('id', '00000000-0000-0000-0000-000000000000'); // Delete all rows
+        .delete();
+    
+    if (year) {
+        query = query.eq('year', year);
+    } else {
+        query = query.neq('id', '00000000-0000-0000-0000-000000000000'); // Delete all rows
+    }
+    
+    const { error } = await query;
     
     if (error) {
         console.error('❌ Error clearing festivals:', error.message);
         return false;
     }
-    console.log('🗑️ Cleared all existing festivals');
+    console.log(`🗑️ Cleared ${year ? `festivals for ${year}` : 'all festivals'}`);
     return true;
 }
 
@@ -220,7 +230,7 @@ async function logFestivalUpdate(year, count) {
             .upsert([{
                 year: year,
                 updated_at: new Date().toISOString(),
-                festival_count: count
+                festivals_count: count
             }], { onConflict: 'year' });
         
         if (error) throw error;
