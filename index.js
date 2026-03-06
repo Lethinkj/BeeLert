@@ -406,8 +406,69 @@ const WIZARD_TIMEOUT = 2 * 60 * 1000; // 2 minutes timeout for wizard sessions
 // CONVERSATION MEMORY SYSTEM
 // ============================================
 const conversationHistory = new Map(); // contextId -> [{role, content, timestamp}]
-const MAX_HISTORY_LENGTH = 10; // Store last 10 messages
-const HISTORY_EXPIRY = 2 * 60 * 60 * 1000; // 2 hours in milliseconds
+const MAX_HISTORY_LENGTH = 20; // Store last 20 messages
+const HISTORY_EXPIRY = 6 * 60 * 60 * 1000; // 6 hours in milliseconds
+
+/**
+ * Split a long response into Discord-friendly chunks (max 2000 chars)
+ * Splits at paragraph/newline boundaries when possible
+ * @param {string} text - The full response text
+ * @param {number} maxLen - Max length per chunk (default 1900 to leave room for part labels)
+ * @returns {string[]} - Array of chunks
+ */
+function splitResponse(text, maxLen = 1900) {
+    if (text.length <= 2000) return [text];
+    
+    const chunks = [];
+    let remaining = text;
+    
+    while (remaining.length > 0) {
+        if (remaining.length <= maxLen) {
+            chunks.push(remaining);
+            break;
+        }
+        
+        // Try to split at a double newline (paragraph break)
+        let splitIdx = remaining.lastIndexOf('\n\n', maxLen);
+        // If no paragraph break, try single newline
+        if (splitIdx < maxLen * 0.3) splitIdx = remaining.lastIndexOf('\n', maxLen);
+        // If no newline, try a sentence end
+        if (splitIdx < maxLen * 0.3) splitIdx = remaining.lastIndexOf('. ', maxLen);
+        // Last resort: hard cut
+        if (splitIdx < maxLen * 0.3) splitIdx = maxLen;
+        
+        chunks.push(remaining.substring(0, splitIdx + 1).trimEnd());
+        remaining = remaining.substring(splitIdx + 1).trimStart();
+    }
+    
+    return chunks;
+}
+
+/**
+ * Send a potentially long AI response, splitting into parts with labels if needed
+ * @param {object} message - Discord message to reply to
+ * @param {string} response - Full AI response text
+ * @param {boolean} scheduleDeletion - Whether to schedule deletion of sent messages
+ */
+async function sendSplitResponse(message, response, scheduleDeletion = false) {
+    const chunks = splitResponse(response);
+    
+    if (chunks.length === 1) {
+        const sent = await message.reply(chunks[0]);
+        if (scheduleDeletion) scheduleMessageDeletion(sent);
+        return;
+    }
+    
+    // Notify user about multi-part response
+    const notice = await message.reply(`📨 Response is long, sharing in **${chunks.length} parts**...`);
+    if (scheduleDeletion) scheduleMessageDeletion(notice);
+    
+    for (let i = 0; i < chunks.length; i++) {
+        const partLabel = `**[Part ${i + 1}/${chunks.length}]**\n`;
+        const sent = await message.channel.send(partLabel + chunks[i]);
+        if (scheduleDeletion) scheduleMessageDeletion(sent);
+    }
+}
 
 /**
  * Add message to conversation history
@@ -2760,11 +2821,14 @@ client.on(Events.MessageCreate, async (message) => {
                     // Add AI response to history
                     addToHistory(userId, 'assistant', aiResponse);
                     
-                    await message.reply(
-                        aiResponse || 
-                        "👋 Hi! I'm BeeLert, your productivity assistant!\n\n" +
-                        "Type `!help` to see all commands or `!reminder` to set up daily reminders!"
-                    );
+                    if (aiResponse) {
+                        await sendSplitResponse(message, aiResponse);
+                    } else {
+                        await message.reply(
+                            "👋 Hi! I'm BeeLert, your productivity assistant!\n\n" +
+                            "Type `!help` to see all commands or `!reminder` to set up daily reminders!"
+                        );
+                    }
                     return;
                 } catch (aiError) {
                     console.error('AI response error in DM:', aiError);
@@ -3372,7 +3436,9 @@ client.on(Events.MessageCreate, async (message) => {
             const contextId = `channel_${message.channel.id}`;
             const history = getHistory(contextId);
             
-            const systemPrompt = `You are BeeLert, a helpful AI assistant in a Discord server. You have conversation memory and can reference previous messages. Answer questions naturally and helpfully. Keep responses concise (under 150 words).`;
+            const systemPrompt = `You are BeeLert, a helpful AI assistant in a Discord server. You have conversation memory and can reference previous messages. Answer questions naturally and helpfully. For code or technical requests, provide complete implementations.
+
+CRITICAL RULE: NEVER wrap code in triple backticks or code blocks. Discord will convert code blocks into downloadable files which users cannot read. Instead, just type the code as plain text directly. Do NOT use \`\`\` at all. You can use single backticks for short inline code only.`;
             
             // Add user message to history (include username for context)
             addToHistory(contextId, 'user', `${message.author.username}: ${message.content}`);
@@ -3383,17 +3449,8 @@ client.on(Events.MessageCreate, async (message) => {
             // Add AI response to history
             addToHistory(contextId, 'assistant', response);
             
-            // Split long responses
-            if (response.length > 2000) {
-                const chunks = response.match(/[\s\S]{1,2000}/g);
-                for (const chunk of chunks) {
-                    const sentMsg = await message.reply(chunk);
-                    scheduleMessageDeletion(sentMsg);
-                }
-            } else {
-                const sentMsg = await message.reply(response);
-                scheduleMessageDeletion(sentMsg);
-            }
+            // Send response (auto-splits into parts if too long)
+            await sendSplitResponse(message, response, true);
             
             // Schedule deletion of user's message too
             scheduleMessageDeletion(message);
@@ -3431,7 +3488,9 @@ client.on(Events.MessageCreate, async (message) => {
             const contextId = `mention_${message.channel.id}`;
             const history = getHistory(contextId);
             
-            const systemPrompt = `You are BeeLert, a helpful AI assistant in a Discord server. A user mentioned you with a question. Answer helpfully and concisely (under 150 words). Be friendly and conversational.`;
+            const systemPrompt = `You are BeeLert, a helpful AI assistant in a Discord server. A user mentioned you with a question. Answer helpfully. For code or technical requests, provide complete implementations.
+
+CRITICAL RULE: NEVER wrap code in triple backticks or code blocks. Discord will convert code blocks into downloadable files which users cannot read. Instead, just type the code as plain text directly. Do NOT use \`\`\` at all.`;
             
             // Add user message to history
             addToHistory(contextId, 'user', `${message.author.username}: ${userQuestion}`);
@@ -3442,15 +3501,8 @@ client.on(Events.MessageCreate, async (message) => {
             // Add AI response to history
             addToHistory(contextId, 'assistant', response);
             
-            // Split long responses
-            if (response.length > 2000) {
-                const chunks = response.match(/[\s\S]{1,2000}/g);
-                for (const chunk of chunks) {
-                    await message.reply(chunk);
-                }
-            } else {
-                await message.reply(response);
-            }
+            // Send response (auto-splits into parts if too long)
+            await sendSplitResponse(message, response);
         } catch (error) {
             console.error('Error handling bot mention:', error);
             await message.reply('Sorry, I had trouble processing that. Please try again!');

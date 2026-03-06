@@ -3,7 +3,7 @@ const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1/chat/completions';
 
 // Default model - you can change this to any OpenRouter supported model
-const DEFAULT_MODEL = process.env.OPENROUTER_MODEL || 'google/gemini-2.5-pro';
+const DEFAULT_MODEL = process.env.OPENROUTER_MODEL || 'google/gemini-2.5-flash';
 
 let isConfigured = false;
 
@@ -20,7 +20,7 @@ if (OPENROUTER_API_KEY) {
  * @param {number} maxTokens - Maximum tokens in response
  * @returns {Promise<string>} - AI response text
  */
-async function makeOpenRouterRequest(messages, maxTokens = 500) {
+async function makeOpenRouterRequest(messages, maxTokens = 2000) {
     const response = await fetch(OPENROUTER_BASE_URL, {
         method: 'POST',
         headers: {
@@ -140,7 +140,7 @@ async function askWithHistory(question, history = [], systemPrompt = '') {
         // Add current question
         messages.push({ role: 'user', content: question });
         
-        return await makeOpenRouterRequest(messages, 500);
+        return await makeOpenRouterRequest(messages, 2000);
     } catch (error) {
         console.error('❌ Error in OpenRouter with history:', error.message);
         
