@@ -210,6 +210,48 @@
                         </div>
                     </div>
 
+                    <!-- VOICE CHANNEL ACTIVITY MONITOR LOGS -->
+                    <div class="panel glass" style="margin-bottom: 24px; border-left: 4px solid #00f2fe;">
+                        <div class="panel-header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
+                            <div>
+                                <h2><i class="fa-solid fa-microphone-lines cyan-text"></i> Voice Channel Activity Monitor Logs</h2>
+                                <span class="sub-text">Live activity logs for Monitored VC: <code>1497644357870682324</code></span>
+                            </div>
+                            <div style="display: flex; gap: 8px; align-items: center;">
+                                <input type="date" id="admin-vc-date-picker" onchange="fetchAdminVoiceLogs()" style="padding: 6px 12px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.5); color: #fff; font-size: 13px;">
+                                <button onclick="fetchAdminVoiceLogs()" class="nav-btn" style="padding: 6px 12px; font-size: 12px;"><i class="fa-solid fa-rotate"></i> Refresh Logs</button>
+                            </div>
+                        </div>
+
+                        <!-- VOICE STATS SUMMARY GRID -->
+                        <div id="admin-vc-stats-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 16px; margin: 16px 0;">
+                            <div class="stat-card glass" style="padding: 12px 16px;">
+                                <span class="stat-title" style="font-size: 11px;">Active Members</span>
+                                <span class="stat-value gold-text" id="vc-stat-members" style="font-size: 20px;">0</span>
+                            </div>
+                            <div class="stat-card glass" style="padding: 12px 16px;">
+                                <span class="stat-title" style="font-size: 11px;">Total Voice Time</span>
+                                <span class="stat-value cyan-text" id="vc-stat-time" style="font-size: 20px;">0m</span>
+                            </div>
+                            <div class="stat-card glass" style="padding: 12px 16px;">
+                                <span class="stat-title" style="font-size: 11px;">Total Sessions</span>
+                                <span class="stat-value purple-text" id="vc-stat-sessions" style="font-size: 20px;">0</span>
+                            </div>
+                            <div class="stat-card glass" style="padding: 12px 16px;">
+                                <span class="stat-title" style="font-size: 11px;">Live Connected</span>
+                                <span class="stat-value green-text" id="vc-stat-live" style="font-size: 20px;">0</span>
+                            </div>
+                        </div>
+
+                        <!-- MEMBER DAILY TOTALS PILLS -->
+                        <div id="admin-vc-members-pills" style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px;"></div>
+
+                        <!-- VOICE LOGS DATA TABLE -->
+                        <div id="admin-vc-logs-container" style="margin-top: 12px; overflow-x: auto;">
+                            <div style="color: var(--text-muted);">Loading voice activity logs...</div>
+                        </div>
+                    </div>
+
                     <div class="panel glass">
                         <div class="panel-header">
                             <h2><i class="fa-solid fa-plus-circle cyan-text"></i> Add New Challenge Question</h2>

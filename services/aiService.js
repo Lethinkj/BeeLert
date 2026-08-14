@@ -15,37 +15,68 @@ if (OPENROUTER_API_KEY) {
 }
 
 /**
- * Make a request to OpenRouter API
+ * Make a request to OpenRouter API with dynamic token reduction & fallback models
  * @param {Array} messages - Array of message objects [{role, content}]
  * @param {number} maxTokens - Maximum tokens in response
  * @returns {Promise<string>} - AI response text
  */
-async function makeOpenRouterRequest(messages, maxTokens = 2000) {
-    const response = await fetch(OPENROUTER_BASE_URL, {
-        method: 'POST',
-        headers: {
-            'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-            'Content-Type': 'application/json',
-            'HTTP-Referer': 'https://github.com/Lethinkj/BeeLert',
-            'X-Title': 'BeeLert Discord Bot'
-        },
-        body: JSON.stringify({
-            model: DEFAULT_MODEL,
-            messages: messages,
-            max_tokens: maxTokens,
-            temperature: 0.7
-        })
-    });
+async function makeOpenRouterRequest(messages, maxTokens = 500) {
+    const modelsToTry = [
+        DEFAULT_MODEL,
+        'google/gemini-2.5-flash:free',
+        'meta-llama/llama-3.3-70b-instruct:free',
+        'deepseek/deepseek-r1:free'
+    ];
 
-    if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        const error = new Error(errorData.error?.message || `HTTP ${response.status}`);
-        error.status = response.status;
-        throw error;
+    const uniqueModels = [...new Set(modelsToTry.filter(Boolean))];
+    let lastError = null;
+
+    for (const model of uniqueModels) {
+        // Try requested maxTokens, fallback to smaller token limits if credit/max_tokens error
+        const tokenLimits = [Math.min(maxTokens, 500), 300, 150];
+
+        for (const limit of tokenLimits) {
+            try {
+                const response = await fetch(OPENROUTER_BASE_URL, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+                        'Content-Type': 'application/json',
+                        'HTTP-Referer': 'https://github.com/Lethinkj/BeeLert',
+                        'X-Title': 'BeeLert Discord Bot'
+                    },
+                    body: JSON.stringify({
+                        model: model,
+                        messages: messages,
+                        max_tokens: limit,
+                        temperature: 0.7
+                    })
+                });
+
+                const data = await response.json().catch(() => ({}));
+
+                if (!response.ok) {
+                    const errMsg = data.error?.message || `HTTP ${response.status}`;
+                    lastError = new Error(errMsg);
+                    lastError.status = response.status;
+                    
+                    if (errMsg.includes('max_tokens') || errMsg.includes('credits')) {
+                        continue; // try next lower token limit
+                    }
+                    break; // try next model
+                }
+
+                const content = data.choices?.[0]?.message?.content;
+                if (content) {
+                    return content;
+                }
+            } catch (err) {
+                lastError = err;
+            }
+        }
     }
 
-    const data = await response.json();
-    return data.choices[0]?.message?.content || '';
+    throw lastError || new Error('Failed to get response from OpenRouter AI');
 }
 
 /**

@@ -33,3 +33,5 @@ venv/
 env/
 
 user-reminders.json
+voice-monitor-sessions.json
+voice-monitor-reports.json

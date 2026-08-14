@@ -136,6 +136,7 @@ function checkAdminAuth() {
         loginView.style.display = 'none';
         controlView.style.display = 'block';
         fetchAdminSolution();
+        fetchAdminVoiceLogs();
     } else {
         loginView.style.display = 'block';
         controlView.style.display = 'none';
@@ -350,3 +351,124 @@ window.addEventListener('DOMContentLoaded', () => {
     setInterval(updateCountdown, 1000);
     updateCountdown();
 });
+
+// ============================================
+// VOICE ACTIVITY MONITOR LOGS CONTROLLER
+// ============================================
+async function fetchAdminVoiceLogs() {
+    const logsContainer = document.getElementById('admin-vc-logs-container');
+    const pillsContainer = document.getElementById('admin-vc-members-pills');
+    const datePicker = document.getElementById('admin-vc-date-picker');
+    if (!logsContainer) return;
+
+    if (datePicker && !datePicker.value) {
+        const todayIST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }))
+            .toISOString().split('T')[0];
+        datePicker.value = todayIST;
+    }
+
+    const selectedDate = datePicker ? datePicker.value : '';
+
+    try {
+        const res = await fetch(`/api/admin/voice-monitor/logs?date=${encodeURIComponent(selectedDate)}`, {
+            headers: { 'X-Admin-Key': currentAdminKey }
+        });
+        const data = await res.json();
+
+        if (data.success) {
+            const stats = data.stats || {};
+            const elMembers = document.getElementById('vc-stat-members');
+            const elTime = document.getElementById('vc-stat-time');
+            const elSessions = document.getElementById('vc-stat-sessions');
+            const elLive = document.getElementById('vc-stat-live');
+
+            if (elMembers) elMembers.innerText = stats.activeMembersCount || 0;
+            if (elTime) elTime.innerText = formatSecondsToReadable(stats.totalVoiceSeconds || 0);
+            if (elSessions) elSessions.innerText = stats.totalSessionsCount || 0;
+            if (elLive) elLive.innerText = stats.liveConnectedCount || 0;
+
+            const members = data.memberSummary || [];
+            if (pillsContainer) {
+                if (members.length === 0) {
+                    pillsContainer.innerHTML = `<span style="font-size: 12px; color: var(--text-muted);">No voice members recorded for ${data.date}.</span>`;
+                } else {
+                    pillsContainer.innerHTML = members.map((m, idx) => `
+                        <div style="background: rgba(255,255,255,0.06); border: 1px solid rgba(0,242,254,0.3); border-radius: 20px; padding: 4px 12px; font-size: 12px; display: flex; align-items: center; gap: 6px;">
+                            <strong style="color: #00f2fe;">#${idx + 1} ${escapeHtml(m.username)}</strong>
+                            <span style="color: var(--text-muted); font-size: 11px;">(${formatSecondsToReadable(m.totalSeconds)} • ${m.sessionCount} sessions)</span>
+                        </div>
+                    `).join('');
+                }
+            }
+
+            const sessions = data.sessions || [];
+            if (sessions.length === 0) {
+                logsContainer.innerHTML = `<div style="text-align: center; padding: 24px; color: var(--text-muted);">No voice activity sessions logged on ${data.date}.</div>`;
+                return;
+            }
+
+            const rowsHtml = sessions.map(s => {
+                const joinStr = formatIsoToISTTime(s.joinTime);
+                const leaveStr = s.isLive ? '🟢 Connected Live' : (s.leaveTime ? formatIsoToISTTime(s.leaveTime) : 'N/A');
+                const durStr = formatSecondsToReadable(s.durationSeconds);
+                const statusBadge = s.isLive 
+                    ? `<span class="tag" style="background: rgba(46,204,113,0.2); color: #2ecc71; border: 1px solid #2ecc71;">LIVE</span>`
+                    : `<span class="tag" style="background: rgba(255,255,255,0.1); color: var(--text-muted);">COMPLETED</span>`;
+
+                return `
+                    <tr style="border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 13px;">
+                        <td style="padding: 10px; font-weight: 600; color: #fff;">
+                            <i class="fa-solid fa-user-astronaut cyan-text"></i> ${escapeHtml(s.username)}
+                            <div style="font-size: 10px; color: var(--text-muted); font-family: monospace;">ID: ${s.discordUserId}</div>
+                        </td>
+                        <td style="padding: 10px; color: #e0e0e0; font-family: 'Fira Code', monospace; font-size: 12px;">${joinStr}</td>
+                        <td style="padding: 10px; color: ${s.isLive ? '#2ecc71' : '#e0e0e0'}; font-family: 'Fira Code', monospace; font-size: 12px;">${leaveStr}</td>
+                        <td style="padding: 10px; font-weight: 600; color: #f1c40f; font-family: 'Fira Code', monospace;">${durStr}</td>
+                        <td style="padding: 10px;">${statusBadge}</td>
+                    </tr>
+                `;
+            }).join('');
+
+            logsContainer.innerHTML = `
+                <table style="width: 100%; border-collapse: collapse; text-align: left;">
+                    <thead>
+                        <tr style="border-bottom: 1px solid rgba(255,255,255,0.15); font-size: 11px; text-transform: uppercase; color: var(--text-muted);">
+                            <th style="padding: 8px 10px;">Member</th>
+                            <th style="padding: 8px 10px;">Join Time (IST)</th>
+                            <th style="padding: 8px 10px;">Leave Time (IST)</th>
+                            <th style="padding: 8px 10px;">Duration</th>
+                            <th style="padding: 8px 10px;">Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${rowsHtml}
+                    </tbody>
+                </table>
+            `;
+        } else {
+            logsContainer.innerHTML = `<div style="color: #e74c3c;">Failed to load logs: ${data.error || 'Unknown error'}</div>`;
+        }
+    } catch (err) {
+        logsContainer.innerHTML = `<div style="color: #e74c3c;">Error fetching voice logs: ${err.message}</div>`;
+    }
+}
+
+function formatSecondsToReadable(totalSec) {
+    if (!totalSec || totalSec <= 0) return '0m';
+    const hrs = Math.floor(totalSec / 3600);
+    const mins = Math.floor((totalSec % 3600) / 60);
+    const secs = totalSec % 60;
+    if (hrs > 0) return `${hrs}h ${mins}m`;
+    if (mins > 0) return `${mins}m ${secs}s`;
+    return `${secs}s`;
+}
+
+function formatIsoToISTTime(isoStr) {
+    if (!isoStr) return 'N/A';
+    try {
+        const d = new Date(isoStr);
+        return d.toLocaleTimeString('en-US', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    } catch (e) {
+        return isoStr;
+    }
+}

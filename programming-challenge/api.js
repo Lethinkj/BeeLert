@@ -124,6 +124,80 @@ function registerRoutes(app, client) {
         }
     });
 
+    // Admin Get Voice Activity Monitor Logs
+    app.get('/api/admin/voice-monitor/logs', requireAdmin, async (req, res) => {
+        try {
+            const voiceMonitor = require('../voice-monitor');
+            const nowIST = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+            const todayStr = nowIST.toISOString().split('T')[0];
+            const targetDate = req.query.date || todayStr;
+
+            const dbSessions = await voiceMonitor.db.getSessionsForDate(targetDate);
+            const activeMap = voiceMonitor.tracker.getActiveSessions();
+            const now = Date.now();
+
+            const combinedSessions = [...dbSessions.map(s => ({ ...s, isLive: false }))];
+
+            if (targetDate === todayStr) {
+                activeMap.forEach((active, userId) => {
+                    const durationSec = Math.max(0, Math.floor((now - active.joinTime) / 1000));
+                    combinedSessions.push({
+                        sessionId: active.sessionId,
+                        discordUserId: userId,
+                        username: active.username,
+                        guildId: active.guildId,
+                        voiceChannelId: active.voiceChannelId,
+                        joinTime: new Date(active.joinTime).toISOString(),
+                        leaveTime: null,
+                        durationSeconds: durationSec,
+                        sessionDate: targetDate,
+                        isLive: true
+                    });
+                });
+            }
+
+            const userStats = new Map();
+            combinedSessions.forEach(s => {
+                const uid = s.discordUserId;
+                if (!userStats.has(uid)) {
+                    userStats.set(uid, {
+                        discordUserId: uid,
+                        username: s.username || `user_${uid}`,
+                        totalSeconds: 0,
+                        sessionCount: 0
+                    });
+                }
+                const stat = userStats.get(uid);
+                stat.totalSeconds += (s.durationSeconds || 0);
+                stat.sessionCount += 1;
+            });
+
+            const memberSummary = Array.from(userStats.values())
+                .sort((a, b) => b.totalSeconds - a.totalSeconds);
+
+            const activeMembersCount = memberSummary.length;
+            const totalVoiceSeconds = memberSummary.reduce((acc, m) => acc + m.totalSeconds, 0);
+            const liveConnectedCount = targetDate === todayStr ? activeMap.size : 0;
+
+            res.json({
+                success: true,
+                date: targetDate,
+                monitoredVcId: voiceMonitor.config.MONITORED_VC_ID,
+                stats: {
+                    activeMembersCount,
+                    totalVoiceSeconds,
+                    totalSessionsCount: combinedSessions.length,
+                    liveConnectedCount
+                },
+                memberSummary,
+                sessions: combinedSessions.sort((a, b) => new Date(b.joinTime) - new Date(a.joinTime))
+            });
+        } catch (err) {
+            console.error('❌ Error fetching admin voice logs:', err);
+            res.status(500).json({ success: false, error: err.message });
+        }
+    });
+
     // Admin Force Post Challenge
     app.post('/api/admin/challenge/force-post', requireAdmin, async (req, res) => {
         try {

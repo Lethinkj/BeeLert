@@ -7,6 +7,8 @@ require('dotenv').config();
 const aiService = require('./services/aiService');
 // Import Supabase service
 const supabaseService = require('./services/supabaseService');
+// Import Voice Monitor module
+const voiceMonitor = require('./voice-monitor');
 
 // ==== INSTANCE LOCK: Prevent duplicate bot instances (Replit issue) ====
 const INSTANCE_ID = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -1871,6 +1873,9 @@ async function registerCronJobs() {
     // Old daily update startup backup check disabled (replaced by Direct DM system)
 
     console.log('✅ All cron jobs and startup checks registered');
+
+    // Initialize Daily Voice Activity Monitoring System
+    voiceMonitor.init(client);
 }
 
 // Bot ready event
@@ -2693,10 +2698,17 @@ client.on(Events.MessageCreate, async (message) => {
                               message.channel.parentId === PROGRESS_CHANNEL_ID;
 
     // STRICT MAIN SERVER FILTER:
-    // In Main Server (COMMUNITY_SERVER_ID), ignore ALL channels EXCEPT the progress channel
+    // In Main Server (COMMUNITY_SERVER_ID), ignore ALL channels EXCEPT:
+    // 1. Progress channel updates (forum threads)
+    // 2. Restricted AI response in monitored VC (1497644357870682324) ONLY if bot is explicitly mentioned
     const mainServerId = process.env.COMMUNITY_SERVER_ID || '1163002451746623528';
-    if (message.guild && message.guild.id === mainServerId && !isProgressChannel) {
-        return;
+    const monitoredVcId = '1497644357870682324';
+    const isVoiceMentionAllowed = message.channel.id === monitoredVcId && message.mentions.has(client.user);
+
+    if (message.guild && message.guild.id === mainServerId) {
+        if (!isProgressChannel && !isVoiceMentionAllowed) {
+            return;
+        }
     }
 
     if (isProgressChannel && !message.content.startsWith('!')) {
@@ -3562,6 +3574,17 @@ CRITICAL RULE: NEVER wrap code in triple backticks or code blocks. Discord will 
 
     // Handle @mentions of the bot in any channel
     if (message.mentions.has(client.user) && !message.author.bot) {
+        const mainServerId = process.env.COMMUNITY_SERVER_ID || '1163002451746623528';
+        const monitoredVcId = '1497644357870682324';
+
+        // RESTRICTED MAIN SERVER RULE:
+        // In Main Server (1163002451746623528), AI response is allowed ONLY in VC 1497644357870682324 when bot is mentioned.
+        if (message.guild && message.guild.id === mainServerId) {
+            if (message.channel.id !== monitoredVcId) {
+                return; // DO NOT RESPOND ❌
+            }
+        }
+
         try {
             await message.channel.sendTyping();
             
@@ -3778,6 +3801,9 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
         const userId = newState.id;
         const oldChannel = oldState.channel;
         const newChannel = newState.channel;
+
+        // Daily Voice Activity Monitoring (Silent, VC 1497644357870682324)
+        await voiceMonitor.handleVoiceStateUpdate(oldState, newState);
         
         // Check for active scheduled meetings first
         await handleScheduledMeetingTracking(userId, oldState, newState);
