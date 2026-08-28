@@ -1019,10 +1019,10 @@ app.get('/status', (req, res) => {
 
 // Start Express server (can be disabled with NO_HTTP=true to avoid Replit dual-instance issues)
 if (process.env.NO_HTTP !== 'true') {
-    app.listen(PORT, () => {
-        console.log(`Express server running on port ${PORT}`);
-        console.log(`Health check: http://localhost:${PORT}/health`);
-        console.log(`Status check: http://localhost:${PORT}/status`);
+    app.listen(PORT, '0.0.0.0', () => {
+        console.log(`Express server running on 0.0.0.0:${PORT}`);
+        console.log(`Health check: http://0.0.0.0:${PORT}/health`);
+        console.log(`Status check: http://0.0.0.0:${PORT}/status`);
     });
 } else {
     console.log('⚠️ HTTP server disabled (NO_HTTP=true) — bot-only mode');
